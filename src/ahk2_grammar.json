@@ -1,0 +1,61 @@
+{
+  "version": "2.0",
+  "description": "AHK2 grammar rules for the AHK# AST Engine. Hot-swappable without recompiling C#.",
+  "operators": {
+    "precedence": [
+      {"level": 1, "ops": [":=", "+=", "-=", "*=", "/=", "//=", ".=", "|=", "&=", "^=", ">>=", "<<=", ">>>="], "assoc": "right", "desc": "Assignment"},
+      {"level": 2, "ops": ["?"], "assoc": "right", "desc": "Ternary"},
+      {"level": 3, "ops": ["||", "or"], "assoc": "left", "desc": "Logical OR"},
+      {"level": 4, "ops": ["&&", "and"], "assoc": "left", "desc": "Logical AND"},
+      {"level": 5, "ops": ["|"], "assoc": "left", "desc": "Bitwise OR"},
+      {"level": 6, "ops": ["^"], "assoc": "left", "desc": "Bitwise XOR"},
+      {"level": 7, "ops": ["&"], "assoc": "left", "desc": "Bitwise AND"},
+      {"level": 8, "ops": ["==", "!=", "~=", "="], "assoc": "left", "desc": "Equality"},
+      {"level": 9, "ops": ["<", ">", "<=", ">="], "assoc": "left", "desc": "Relational"},
+      {"level": 10, "ops": ["<<", ">>", ">>>"], "assoc": "left", "desc": "Bitwise Shift"},
+      {"level": 11, "ops": [".."], "assoc": "left", "desc": "Concatenation"},
+      {"level": 12, "ops": ["+", "-"], "assoc": "left", "desc": "Addition"},
+      {"level": 13, "ops": ["*", "/", "//"], "assoc": "left", "desc": "Multiplication"},
+      {"level": 14, "ops": ["**"], "assoc": "right", "desc": "Power"}
+    ],
+    "unary_prefix": ["!", "~", "-", "+", "&", "*", "not"],
+    "unary_postfix": ["++", "--"]
+  },
+  "keywords": {
+    "flow_control": ["if", "else", "while", "for", "loop", "until", "break", "continue", "return", "goto"],
+    "declarations": ["class", "extends", "global", "local", "static"],
+    "error_handling": ["try", "catch", "finally", "throw"],
+    "switch": ["switch", "case", "default"],
+    "special": ["this", "super", "new", "and", "or", "not", "in", "is", "contains"]
+  },
+  "literals": {
+    "string_delimiters": ["\"", "'"],
+    "string_escape_char": "`",
+    "string_escape_sequences": {
+      "`n": "\\n", "`r": "\\r", "`t": "\\t", "`a": "\\a",
+      "`b": "\\b", "`v": "\\v", "`f": "\\f", "`s": " ",
+      "``": "`", "`\"": "\"", "`'": "'"
+    },
+    "number_formats": ["decimal", "hex_0x", "scientific"],
+    "boolean_values": ["true", "false"],
+    "null_value": "unset"
+  },
+  "ahk_specific": {
+    "directives": ["#Requires", "#Include", "#SingleInstance", "#NoTrayIcon", "#Warn",
+                   "#HotIf", "#UseHook", "#InputLevel", "#MaxThreadsPerHotkey",
+                   "#MaxThreadsBuffer", "#SuspendExempt", "#ErrorStdOut",
+                   "#ClipboardTimeout", "#DllLoad"],
+    "hotkey_modifiers": ["^", "!", "+", "#", "<", ">", "*", "~", "$", "UP"],
+    "hotstring_options": ["*", "?", "B0", "C", "C1", "K", "O", "P", "R", "SI", "SE", "SP", "T", "X", "Z"],
+    "continuation_section": {
+      "open": "(",
+      "close": ")",
+      "options": ["Join", "LTrim", "RTrim", "Comment", "C", "`"]
+    }
+  },
+  "recovery": {
+    "statement_boundary_patterns": ["\\n(?=[a-zA-Z_#])", "\\}", "\\{"],
+    "max_skip_tokens": 50,
+    "balanced_delimiters": [["(", ")"], ["[", "]"], ["{", "}"]]
+  }
+}
