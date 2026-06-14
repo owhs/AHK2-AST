@@ -2238,6 +2238,87 @@ MyCallback(ctrl, info) {
                 return 1;
             }
 
+            // 58. Verify Loop Until Parsing without braces
+            string testLoopUntilSrc = "Loop\n    f := 1\nUntil !f\n";
+            var root58 = engine.Parse(testLoopUntilSrc);
+            var errors58 = engine.GetErrors(root58);
+            if (errors58.Length > 0)
+            {
+                Console.WriteLine("FAIL: Loop Until parsed with errors: " + string.Join("; ", errors58.Select(e => e.Value)));
+                return 1;
+            }
+            var loops58 = engine.QueryByType(root58, "Loop");
+            if (loops58.Length == 0)
+            {
+                Console.WriteLine("FAIL: Loop Until was not parsed as a Loop!");
+                return 1;
+            }
+            var untils58 = engine.QueryByType(root58, "Until");
+            if (untils58.Length == 0)
+            {
+                Console.WriteLine("FAIL: Loop Until did not contain an Until node!");
+                return 1;
+            }
+            string emitted58 = engine.Emit(root58);
+            Console.WriteLine("Emitted 58:\n" + emitted58);
+            if (!emitted58.Contains("until !f"))
+            {
+                Console.WriteLine("FAIL: Loop Until emitted incorrect until expression!");
+                return 1;
+            }
+
+            // 59. Verify Keyword 'default' as identifier in expression
+            string testDefaultIdentSrc = "GetSetting(key, default) {\n    if (default == 1)\n        return default\n}\n";
+            var root59 = engine.Parse(testDefaultIdentSrc);
+            var errors59 = engine.GetErrors(root59);
+            if (errors59.Length > 0)
+            {
+                Console.WriteLine("FAIL: 'default' keyword as identifier parsed with errors: " + string.Join("; ", errors59.Select(e => e.Value)));
+                return 1;
+            }
+            var idents59 = engine.QueryByType(root59, "Identifier").Where(i => i.Value == "default").ToArray();
+            if (idents59.Length != 2) // 1 in condition, 1 in return
+            {
+                Console.WriteLine("FAIL: Expected 2 'default' Identifier nodes, but got " + idents59.Length);
+                return 1;
+            }
+            var params59 = engine.QueryByType(root59, "Parameter").Where(p => p.Value == "default").ToArray();
+            if (params59.Length != 1) // 1 in parameters
+            {
+                Console.WriteLine("FAIL: Expected 1 'default' Parameter node, but got " + params59.Length);
+                return 1;
+            }
+            string emitted59 = engine.Emit(root59);
+            Console.WriteLine("Emitted 59:\n" + emitted59);
+            if (!emitted59.Contains("return default"))
+            {
+                Console.WriteLine("FAIL: 'default' identifier emission was incorrect!");
+                return 1;
+            }
+
+            // 60. Verify Hotstrings with options
+            string testHotstringSrc = "::btw::by the way\n:o:btw::by the way\n";
+            var root60 = engine.Parse(testHotstringSrc);
+            var errors60 = engine.GetErrors(root60);
+            if (errors60.Length > 0)
+            {
+                Console.WriteLine("FAIL: Hotstrings with options parsed with errors: " + string.Join("; ", errors60.Select(e => e.Value)));
+                return 1;
+            }
+            var hotstrings60 = engine.QueryByType(root60, "Hotstring");
+            if (hotstrings60.Length != 2)
+            {
+                Console.WriteLine("FAIL: Expected 2 Hotstring nodes, but got " + hotstrings60.Length);
+                return 1;
+            }
+            string emitted60 = engine.Emit(root60);
+            Console.WriteLine("Emitted 60:\n" + emitted60);
+            if (!emitted60.Contains("::btw::by the way") || !emitted60.Contains(":o:btw::by the way"))
+            {
+                Console.WriteLine("FAIL: Hotstrings were not emitted correctly!");
+                return 1;
+            }
+
             Console.WriteLine("SUCCESS: All tests passed!");
             return 0;
         }

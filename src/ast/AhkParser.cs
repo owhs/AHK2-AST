@@ -569,9 +569,14 @@ public class AhkParser
         Token t = Advance();
         var node = new AstNode("Loop", t.Line, t.Column);
 
-        // Check for Loop variants: Parse, Files, Reg, Read
-        SkipNewlines();
-        if (Current.Type == TokenType.Identifier)
+        // Skip any comments on the same line
+        while (Current.Type == TokenType.Comment && Current.Line == t.Line)
+        {
+            Advance();
+        }
+
+        // Check for Loop variants: Parse, Files, Reg, Read (must be on the same line)
+        if (Current.Type == TokenType.Identifier && Current.Line == t.Line)
         {
             string variant = Current.Value.ToLower();
             if (variant == "parse" || variant == "files" || variant == "reg" || variant == "read")
@@ -622,8 +627,8 @@ public class AhkParser
             }
         }
 
-        // Standard Loop [count] { body }
-        if (Current.Type != TokenType.LBrace && Current.Type != TokenType.Newline && Current.Type != TokenType.EOF)
+        // Standard Loop [count] { body } (must be on the same line)
+        if (Current.Type != TokenType.LBrace && Current.Type != TokenType.Newline && Current.Type != TokenType.EOF && Current.Line == t.Line)
         {
             node.AddChild(ParseExpression(0));
         }
@@ -1680,6 +1685,27 @@ public class AhkParser
 
             case TokenType.New:
             case TokenType.Identifier:
+            case TokenType.If:
+            case TokenType.Else:
+            case TokenType.While:
+            case TokenType.For:
+            case TokenType.Loop:
+            case TokenType.Until:
+            case TokenType.Break:
+            case TokenType.Continue:
+            case TokenType.Return:
+            case TokenType.Class:
+            case TokenType.Extends:
+            case TokenType.Try:
+            case TokenType.Catch:
+            case TokenType.Finally:
+            case TokenType.Throw:
+            case TokenType.Switch:
+            case TokenType.Case:
+            case TokenType.Default:
+            case TokenType.Global:
+            case TokenType.Local:
+            case TokenType.Static:
                 Advance();
                 // Single-param fat arrow: identifier => expression
                 if (Current.Type == TokenType.FatArrow)

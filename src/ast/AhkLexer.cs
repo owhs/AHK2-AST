@@ -94,6 +94,20 @@ public class AhkLexer
                 }
             }
 
+            // Hotstring detection (must be before operators/delimiters and standard colons)
+            if (IsStartOfLine() && c == ':')
+            {
+                int hsLength;
+                if (IsHotstringStart(out hsLength))
+                {
+                    string hs = _src.Substring(_pos, hsLength);
+                    _pos += hsLength;
+                    _col += hsLength;
+                    Emit(TokenType.Hotstring, hs);
+                    continue;
+                }
+            }
+
             // Directives (#Include, #Requires, etc.)
             if (c == '#' && (_col == 1 || _tokens.Count == 0 || LastTokenIs(TokenType.Newline)))
             {
@@ -168,13 +182,7 @@ public class AhkLexer
                 continue;
             }
 
-            // Hotstring: ::trigger::replacement
-            if (c == ':' && PeekAt(1) == ':')
-            {
-                string hs = ReadHotstring();
-                Emit(TokenType.Hotstring, hs);
-                continue;
-            }
+
 
             // Variable dereferencing: %expr%
             if (c == '%')
@@ -236,6 +244,54 @@ public class AhkLexer
             if (_tokens[i].Type == TokenType.Newline) return true;
             if (_tokens[i].Type != TokenType.Comment) return false;
         }
+        return true;
+    }
+
+    private bool IsHotstringStart(out int length)
+    {
+        length = 0;
+        if (!IsStartOfLine()) return false;
+        if (Peek() != ':') return false;
+
+        int p = _pos;
+        // Skip first ':'
+        p++;
+
+        // We need to find the second ':' to close the options.
+        // It must be on the same line, before any whitespace or newline.
+        while (p < _src.Length && _src[p] != '\n' && _src[p] != '\r' && _src[p] != ' ' && _src[p] != '\t' && _src[p] != ':')
+        {
+            p++;
+        }
+
+        if (p >= _src.Length || _src[p] != ':') return false;
+
+        // Found the second ':'. Now skip it.
+        p++;
+
+        // Now we need to find the ending '::' on the same line.
+        bool foundEnd = false;
+        while (p + 1 < _src.Length && _src[p] != '\n' && _src[p] != '\r')
+        {
+            if (_src[p] == ':' && _src[p + 1] == ':')
+            {
+                foundEnd = true;
+                p += 2; // skip the '::'
+                break;
+            }
+            p++;
+        }
+
+        if (!foundEnd) return false;
+
+        // Yes! It is a hotstring.
+        // The hotstring token should consume the rest of the line (replacement can be inline).
+        while (p < _src.Length && _src[p] != '\n' && _src[p] != '\r')
+        {
+            p++;
+        }
+
+        length = p - _pos;
         return true;
     }
 
