@@ -13,6 +13,8 @@ public class AhkParser
     private int _pos;
     private GrammarRules _grammar;
     private List<string> _warnings;
+    private bool _hotstringXActive = false;
+    private List<AstNode> _skippedComments = new List<AstNode>();
 
     private static readonly HashSet<string> KnownExceptionClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -40,7 +42,13 @@ public class AhkParser
     private void SkipNewlines()
     {
         while (Current.Type == TokenType.Newline || Current.Type == TokenType.Comment)
+        {
+            if (Current.Type == TokenType.Comment)
+            {
+                _skippedComments.Add(CreateCommentOrWarningNode(Current));
+            }
             Advance();
+        }
     }
 
     private void SkipNewlinesOnly()
@@ -162,6 +170,12 @@ public class AhkParser
             try
             {
                 var stmt = ParseStatement();
+                foreach (var comment in _skippedComments)
+                {
+                    program.AddChild(comment);
+                }
+                _skippedComments.Clear();
+
                 if (stmt != null)
                     program.AddChild(stmt);
             }
@@ -351,6 +365,24 @@ public class AhkParser
         Token t = Advance();
         var node = new AstNode("Directive", t.Line, t.Column);
         node.Value = t.Value;
+
+        if (t.Value != null && t.Value.StartsWith("#Hotstring", StringComparison.OrdinalIgnoreCase))
+        {
+            string opts = t.Value.Substring("#Hotstring".Length).Trim();
+            string[] parts = opts.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var part in parts)
+            {
+                if (part.Equals("X0", StringComparison.OrdinalIgnoreCase))
+                {
+                    _hotstringXActive = false;
+                }
+                else if (part.Equals("X", StringComparison.OrdinalIgnoreCase))
+                {
+                    _hotstringXActive = true;
+                }
+            }
+        }
+
         return node;
     }
 
@@ -359,20 +391,25 @@ public class AhkParser
         Token t = Advance();
         var node = new AstNode("Hotkey", t.Line, t.Column);
         node.Value = t.Value;
-        SkipNewlines();
-        if (Current.Type == TokenType.LBrace)
-            node.AddChild(ParseBlock());
-        else if (Current.Type != TokenType.EOF && Current.Type != TokenType.Newline)
-            node.AddChild(ParseStatement());
-        return node;
-    }
 
-    private AstNode ParseHotstring()
-    {
-        Token t = Advance();
-        var node = new AstNode("Hotstring", t.Line, t.Column);
-        node.Value = t.Value;
-        if (t.Value != null && t.Value.Trim().EndsWith("::"))
+        // Check if the body is inline (on the same line)
+        bool isInline = false;
+        int idx = _pos;
+        while (idx < _tokens.Count && _tokens[idx].Type == TokenType.Comment)
+        {
+            idx++;
+        }
+        if (idx < _tokens.Count && _tokens[idx].Type != TokenType.Newline && _tokens[idx].Type != TokenType.EOF)
+        {
+            isInline = true;
+        }
+
+        if (isInline)
+        {
+            node.Metadata = "inline";
+            node.AddChild(ParseStatement());
+        }
+        else
         {
             SkipNewlines();
             if (Current.Type == TokenType.LBrace)
@@ -381,6 +418,158 @@ public class AhkParser
                 node.AddChild(ParseStatement());
         }
         return node;
+    }
+
+    private AstNode ParseHotstring()
+    {
+        Token t = Advance();
+        var node = new AstNode("Hotstring", t.Line, t.Column);
+        node.Value = t.Value;
+
+        string options, trigger, replacement;
+        bool isExec = IsHotstringExecutable(t.Value, out options, out trigger, out replacement);
+
+        if (isExec)
+        {
+            node.Value = ":" + options + ":" + trigger + "::";
+            node.Metadata = "inline";
+
+            var subLexer = new AhkLexer(replacement);
+            var subTokens = subLexer.Tokenize();
+            if (subTokens.Count > 0 && subTokens[subTokens.Count - 1].Type == TokenType.EOF)
+            {
+                subTokens.RemoveAt(subTokens.Count - 1);
+            }
+
+            // Extract trailing comment if present
+            Token commentToken = null;
+            for (int i = subTokens.Count - 1; i >= 0; i--)
+            {
+                if (subTokens[i].Type == TokenType.Comment)
+                {
+                    commentToken = subTokens[i];
+                    subTokens.RemoveAt(i);
+                    break;
+                }
+            }
+
+            if (commentToken != null)
+            {
+                node.Metadata = "inline;" + commentToken.Value;
+            }
+
+            var subParser = new AhkParser(subTokens, _grammar);
+            subParser._hotstringXActive = this._hotstringXActive;
+            var bodyNode = subParser.ParseStatement();
+            if (bodyNode != null)
+            {
+                node.AddChild(bodyNode);
+            }
+        }
+        else
+        {
+            if (t.Value != null && t.Value.Trim().EndsWith("::"))
+            {
+                bool isInline = false;
+                int idx = _pos;
+                while (idx < _tokens.Count && _tokens[idx].Type == TokenType.Comment)
+                {
+                    idx++;
+                }
+                if (idx < _tokens.Count && _tokens[idx].Type != TokenType.Newline && _tokens[idx].Type != TokenType.EOF)
+                {
+                    isInline = true;
+                }
+
+                if (isInline)
+                {
+                    node.Metadata = "inline";
+                    node.AddChild(ParseStatement());
+                }
+                else
+                {
+                    SkipNewlines();
+                    if (Current.Type == TokenType.LBrace)
+                        node.AddChild(ParseBlock());
+                    else if (Current.Type != TokenType.EOF && Current.Type != TokenType.Newline)
+                        node.AddChild(ParseStatement());
+                }
+            }
+        }
+        return node;
+    }
+
+    private bool IsHotstringExecutable(string hsValue, out string options, out string trigger, out string replacement)
+    {
+        options = "";
+        trigger = "";
+        replacement = "";
+
+        if (string.IsNullOrEmpty(hsValue) || !hsValue.StartsWith(":"))
+            return false;
+
+        int secondColon = hsValue.IndexOf(':', 1);
+        if (secondColon < 0)
+            return false;
+
+        options = hsValue.Substring(1, secondColon - 1);
+
+        int endColons = hsValue.IndexOf("::", secondColon + 1);
+        if (endColons < 0)
+            return false;
+
+        trigger = hsValue.Substring(secondColon + 1, endColons - (secondColon + 1));
+        replacement = hsValue.Substring(endColons + 2);
+
+        bool localX = false;
+        bool localX0 = false;
+        
+        string optUpper = options.ToUpperInvariant();
+        if (optUpper.Contains("X0"))
+        {
+            localX0 = true;
+        }
+        else if (optUpper.Contains("X"))
+        {
+            localX = true;
+        }
+
+        bool isExecutable = false;
+        if (localX)
+            isExecutable = true;
+        else if (localX0)
+            isExecutable = false;
+        else
+            isExecutable = _hotstringXActive;
+
+        return isExecutable;
+    }
+
+    private bool IsAssignmentOperator(TokenType type)
+    {
+        switch (type)
+        {
+            case TokenType.ColonAssign:
+            case TokenType.PlusAssign:
+            case TokenType.MinusAssign:
+            case TokenType.StarAssign:
+            case TokenType.SlashAssign:
+            case TokenType.DotAssign:
+            case TokenType.NullCoalesceAssign:
+            case TokenType.BitwiseAndAssign:
+            case TokenType.BitwiseOrAssign:
+            case TokenType.BitwiseXorAssign:
+            case TokenType.IntDivAssign:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private bool IsValidLValue(AstNode node)
+    {
+        if (node == null) return false;
+        return node.NodeType == "Identifier" || node.NodeType == "Member" || node.NodeType == "Index";
     }
 
     private bool IsParenConditionFollowedByOperator()
@@ -711,7 +900,15 @@ public class AhkParser
             try
             {
                 // Class members: methods, properties, static
-                node.AddChild(ParseClassMember());
+                var member = ParseClassMember();
+                foreach (var comment in _skippedComments)
+                {
+                    node.AddChild(comment);
+                }
+                _skippedComments.Clear();
+
+                if (member != null)
+                    node.AddChild(member);
             }
             catch (Exception ex)
             {
@@ -1365,7 +1562,15 @@ public class AhkParser
             int before = _pos;
             try
             {
-                block.AddChild(ParseStatement());
+                var stmt = ParseStatement();
+                foreach (var comment in _skippedComments)
+                {
+                    block.AddChild(comment);
+                }
+                _skippedComments.Clear();
+
+                if (stmt != null)
+                    block.AddChild(stmt);
             }
             catch (Exception ex)
             {
@@ -1398,11 +1603,16 @@ public class AhkParser
 
         // Check for comma continuation starting on the next line
         int savePos = _pos;
+        int saveSkipped = _skippedComments.Count;
         SkipNewlines();
         bool hasCommaContinuation = (Current.Type == TokenType.Comma);
         if (!hasCommaContinuation)
         {
             _pos = savePos; // restore if not continuing
+            if (_skippedComments.Count > saveSkipped)
+            {
+                _skippedComments.RemoveRange(saveSkipped, _skippedComments.Count - saveSkipped);
+            }
         }
 
         // Multi-statement comma: x := 1, y := 2
@@ -1438,44 +1648,57 @@ public class AhkParser
         {
             // Skip newlines only if next token is an operator (continuation)
             int savePos = _pos;
+            int saveSkipped = _skippedComments.Count;
             SkipNewlines();
 
+            bool didOverridePrecedence = false;
             int prec = GetPrecedence(Current.Type);
             if (prec < minPrec || prec == 0)
             {
-                _pos = savePos; // restore if we shouldn't continue
-
-                if (minPrec <= 11 && Current.Type != TokenType.Newline
-                    && Current.Type != TokenType.EOF && Current.Type != TokenType.Comment)
+                if (prec < minPrec && IsAssignmentOperator(Current.Type) && IsValidLValue(left))
                 {
-                    Token prev = _pos > 0 ? _tokens[_pos - 1] : null;
-                    if (prev != null)
+                    didOverridePrecedence = true;
+                }
+                else
+                {
+                    _pos = savePos; // restore if we shouldn't continue
+                    if (_skippedComments.Count > saveSkipped)
                     {
-                        TokenType ct = Current.Type;
-                        if (ct == TokenType.String || ct == TokenType.Number || ct == TokenType.Identifier
-                            || ct == TokenType.LParen || ct == TokenType.This || ct == TokenType.Super)
-                        {
-                            int beforeConcat = _pos;
-                            var concatRight = ParseExpression(12);
-                            if (_pos > beforeConcat) // only if tokens were consumed
-                            {
-                                Token cprev = _tokens[beforeConcat - 1];
-                                Token cnext = _tokens[beforeConcat];
-                                bool hasSpace = cprev.Line != cnext.Line || cprev.Column + cprev.Value.Length < cnext.Column;
+                        _skippedComments.RemoveRange(saveSkipped, _skippedComments.Count - saveSkipped);
+                    }
 
-                                var concatNode = new AstNode("Concat", left.Line, left.Column);
-                                concatNode.Value = hasSpace ? " " : "";
-                                concatNode.Metadata = hasSpace ? "space" : "nospace";
-                                concatNode.AddChild(left);
-                                concatNode.AddChild(concatRight);
-                                left = concatNode;
-                                continue;
+                    if (minPrec <= 11 && Current.Type != TokenType.Newline
+                        && Current.Type != TokenType.EOF && Current.Type != TokenType.Comment)
+                    {
+                        Token prev = _pos > 0 ? _tokens[_pos - 1] : null;
+                        if (prev != null)
+                        {
+                            TokenType ct = Current.Type;
+                            if (ct == TokenType.String || ct == TokenType.Number || ct == TokenType.Identifier
+                                || ct == TokenType.LParen || ct == TokenType.This || ct == TokenType.Super)
+                            {
+                                int beforeConcat = _pos;
+                                var concatRight = ParseExpression(12);
+                                if (_pos > beforeConcat) // only if tokens were consumed
+                                {
+                                    Token cprev = _tokens[beforeConcat - 1];
+                                    Token cnext = _tokens[beforeConcat];
+                                    bool hasSpace = cprev.Line != cnext.Line || cprev.Column + cprev.Value.Length < cnext.Column;
+
+                                    var concatNode = new AstNode("Concat", left.Line, left.Column);
+                                    concatNode.Value = hasSpace ? " " : "";
+                                    concatNode.Metadata = hasSpace ? "space" : "nospace";
+                                    concatNode.AddChild(left);
+                                    concatNode.AddChild(concatRight);
+                                    left = concatNode;
+                                    continue;
+                                }
                             }
                         }
                     }
-                }
 
-                break;
+                    break;
+                }
             }
 
             Token op = Advance();
@@ -1512,7 +1735,17 @@ public class AhkParser
             binary.Value = op.Value;
             binary.AddChild(left);
             binary.AddChild(right);
-            left = binary;
+
+            if (didOverridePrecedence)
+            {
+                var grouped = new AstNode("Grouped", op.Line, op.Column);
+                grouped.AddChild(binary);
+                left = grouped;
+            }
+            else
+            {
+                left = binary;
+            }
         }
 
         return left;
@@ -1532,7 +1765,25 @@ public class AhkParser
             Advance();
             var node = new AstNode("UnaryExpr", t.Line, t.Column);
             node.Value = t.Value;
-            node.AddChild(ParseUnary());
+            var operand = ParseUnary();
+
+            if (IsValidLValue(operand) && IsAssignmentOperator(Current.Type))
+            {
+                Token op = Advance();
+                var right = ParseExpression(0);
+                var assign = new AstNode("BinaryExpr", op.Line, op.Column);
+                assign.Value = op.Value;
+                assign.AddChild(operand);
+                assign.AddChild(right);
+
+                var grouped = new AstNode("Grouped", op.Line, op.Column);
+                grouped.AddChild(assign);
+                node.AddChild(grouped);
+            }
+            else
+            {
+                node.AddChild(operand);
+            }
             return node;
         }
 
@@ -1681,7 +1932,12 @@ public class AhkParser
 
             case TokenType.String:
                 Advance();
-                return new AstNode("String", t.Line, t.Column) { Value = t.Value };
+                var strNode = new AstNode("String", t.Line, t.Column) { Value = t.Value, Metadata = t.Metadata };
+                if (strNode.Metadata != null && strNode.Metadata.StartsWith("raw:"))
+                {
+                    ExtractCommentsFromRaw(strNode.Metadata.Substring(4), strNode);
+                }
+                return strNode;
 
             case TokenType.New:
             case TokenType.Identifier:
@@ -1752,7 +2008,35 @@ public class AhkParser
                     _pos--; // back up to re-parse the paren
                     return ParseFatArrowFunction();
                 }
+
+                var innerComments = new List<AstNode>();
+
+                // Grab any skipped comments that were before or on the LParen line
+                for (int i = 0; i < _skippedComments.Count; i++)
+                {
+                    var c = _skippedComments[i];
+                    if (c.Line <= t.Line)
+                    {
+                        innerComments.Add(c);
+                        _skippedComments.RemoveAt(i);
+                        i--;
+                    }
+                }
+
+                while (Current.Type == TokenType.Comment)
+                {
+                    innerComments.Add(CreateCommentOrWarningNode(Current));
+                    Advance();
+                }
+
                 var expr = ParseExpression(0);
+
+                while (Current.Type == TokenType.Comment)
+                {
+                    innerComments.Add(CreateCommentOrWarningNode(Current));
+                    Advance();
+                }
+
                 // AHK2 comma as multi-statement inside parens: (a := 1, b := 2)
                 if (Current.Type == TokenType.Comma)
                 {
@@ -1763,16 +2047,68 @@ public class AhkParser
                         Advance();
                         SkipNewlines();
                         if (Current.Type == TokenType.RParen) break;
+
+                        while (Current.Type == TokenType.Comment)
+                        {
+                            innerComments.Add(CreateCommentOrWarningNode(Current));
+                            Advance();
+                        }
+
                         seq.AddChild(ParseExpression(0));
+
+                        while (Current.Type == TokenType.Comment)
+                        {
+                            innerComments.Add(CreateCommentOrWarningNode(Current));
+                            Advance();
+                        }
                     }
-                    Expect(TokenType.RParen, "grouped expression");
+                    Token closeParen = Expect(TokenType.RParen, "grouped expression");
+
+                    // Grab any skipped comments up to RParen
+                    for (int i = 0; i < _skippedComments.Count; i++)
+                    {
+                        var c = _skippedComments[i];
+                        if (c.Line <= closeParen.Line)
+                        {
+                            innerComments.Add(c);
+                            _skippedComments.RemoveAt(i);
+                            i--;
+                        }
+                    }
+
                     var grouped2 = new AstNode("Grouped", t.Line, t.Column);
+                    grouped2.EndLine = closeParen.Line;
+                    grouped2.EndColumn = closeParen.Column;
                     grouped2.AddChild(seq);
+                    foreach (var comment in innerComments)
+                    {
+                        grouped2.AddChild(comment);
+                    }
                     return grouped2;
                 }
-                Expect(TokenType.RParen, "grouped expression");
+
+                Token closeParen2 = Expect(TokenType.RParen, "grouped expression");
+
+                // Grab any skipped comments up to RParen
+                for (int i = 0; i < _skippedComments.Count; i++)
+                {
+                    var c = _skippedComments[i];
+                    if (c.Line <= closeParen2.Line)
+                    {
+                        innerComments.Add(c);
+                        _skippedComments.RemoveAt(i);
+                        i--;
+                    }
+                }
+
                 var grouped = new AstNode("Grouped", t.Line, t.Column);
+                grouped.EndLine = closeParen2.Line;
+                grouped.EndColumn = closeParen2.Column;
                 grouped.AddChild(expr);
+                foreach (var comment in innerComments)
+                {
+                    grouped.AddChild(comment);
+                }
                 return grouped;
 
             case TokenType.LBracket:
@@ -2123,5 +2459,34 @@ public class AhkParser
             program.SetChildren(newProgramChildren);
         }
     }
-}
+    private void ExtractCommentsFromRaw(string raw, AstNode parent)
+    {
+        if (string.IsNullOrEmpty(raw)) return;
 
+        string[] lines = raw.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+        for (int lineIdx = 0; lineIdx < lines.Length; lineIdx++)
+        {
+            string line = lines[lineIdx];
+            for (int i = 0; i < line.Length; i++)
+            {
+                char c = line[i];
+                if (c == ';')
+                {
+                    bool isEscaped = (i > 0 && line[i - 1] == '`');
+                    if (!isEscaped)
+                    {
+                        bool isComment = (i == 0 || line[i - 1] == ' ' || line[i - 1] == '\t');
+                        if (isComment)
+                        {
+                            string commentText = line.Substring(i);
+                            var commentNode = new AstNode("Comment", parent.Line + lineIdx, i + 1);
+                            commentNode.Value = commentText;
+                            parent.AddChild(commentNode);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

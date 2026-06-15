@@ -1392,14 +1392,14 @@ z := undefinedVar + 1  ; UndefinedVar warning
             }
 
             // 47. Verify tree-shaker assignment pruning wraps side-effect RHS in parentheses if needed
-            string testPruningParen = "CALG_AES_256 := 1 + CALG_AES_192 := 0x660E\nCALG_AES_192 := 0\n";
+            string testPruningParen = "CALG_AES_256 := 1 + CALG_AES_192 := 0x660E\nMsgBox(CALG_AES_192)\n";
             var pruningParenNode = engine.Parse(testPruningParen);
             var shakerParen = new TreeShakerPlugin();
             shakerParen.Config = new TreeShakerConfig { Profile = TreeShakingProfile.Aggressive };
             shakerParen.Execute(pruningParenNode);
             string pruningParenEmit = engine.Emit(pruningParenNode).Trim();
             Console.WriteLine("Emitted tree-shaker pruned paren: " + pruningParenEmit);
-            if (!pruningParenEmit.Contains("(1 + CALG_AES_192 := 0x660E)"))
+            if (!pruningParenEmit.Contains("(1 + (CALG_AES_192 := 0x660E))"))
             {
                 Console.WriteLine("FAIL: Tree-shaking pruning did not wrap side-effect-ful RHS in parentheses: " + pruningParenEmit);
                 return 1;
@@ -1448,14 +1448,14 @@ z := undefinedVar + 1  ; UndefinedVar warning
                 return 1;
             }
             // 50. Verify tree-shaking nested assignment inside a sequence wraps RHS in parentheses properly
-            string testNestedSeqPruning = "unusedVar := 1 + sideEffectVar := 2, usedVar := 3\nusedVar := 0\n";
+            string testNestedSeqPruning = "unusedVar := 1 + sideEffectVar := 2, usedVar := 3\nMsgBox(sideEffectVar + usedVar)\n";
             var nestedSeqPruningNode = engine.Parse(testNestedSeqPruning);
             var shakerNested = new TreeShakerPlugin();
             shakerNested.Config = new TreeShakerConfig { Profile = TreeShakingProfile.Aggressive };
             shakerNested.Execute(nestedSeqPruningNode);
             string nestedSeqPruningEmit = engine.Emit(nestedSeqPruningNode).Trim();
             Console.WriteLine("Emitted tree-shaker pruned nested sequence:\n" + nestedSeqPruningEmit);
-            if (!nestedSeqPruningEmit.Contains("(1 + sideEffectVar := 2)"))
+            if (!nestedSeqPruningEmit.Contains("(1 + (sideEffectVar := 2))"))
             {
                 Console.WriteLine("FAIL: Tree-shaking nested sequence pruning did not wrap RHS in parentheses: " + nestedSeqPruningEmit);
                 return 1;
@@ -2316,6 +2316,175 @@ MyCallback(ctrl, info) {
             if (!emitted60.Contains("::btw::by the way") || !emitted60.Contains(":o:btw::by the way"))
             {
                 Console.WriteLine("FAIL: Hotstrings were not emitted correctly!");
+                return 1;
+            }
+
+            // 61. Verify Operator Precedence assignment grouping (x == y && z := 1)
+            string testPrecSrc = "x == y && z := 1\nnot x := y\n";
+            var root61 = engine.Parse(testPrecSrc);
+            var errors61 = engine.GetErrors(root61);
+            if (errors61.Length > 0)
+            {
+                Console.WriteLine("FAIL: Precedence test parsed with errors: " + string.Join("; ", errors61.Select(e => e.Value)));
+                return 1;
+            }
+            string emitted61 = engine.Emit(root61).Trim();
+            Console.WriteLine("Emitted 61:\n" + emitted61);
+            if (!emitted61.Contains("x == y && (z := 1)"))
+            {
+                Console.WriteLine("FAIL: Expected 'x == y && (z := 1)', but got:\n" + emitted61);
+                return 1;
+            }
+            if (!emitted61.Contains("not (x := y)"))
+            {
+                Console.WriteLine("FAIL: Expected 'not (x := y)', but got:\n" + emitted61);
+                return 1;
+            }
+
+            // 62. Verify Remap single-line formatting (a::b)
+            string testRemapSrc = "a::b\n";
+            var root62 = engine.Parse(testRemapSrc);
+            var errors62 = engine.GetErrors(root62);
+            if (errors62.Length > 0)
+            {
+                Console.WriteLine("FAIL: Remap test parsed with errors: " + string.Join("; ", errors62.Select(e => e.Value)));
+                return 1;
+            }
+            string emitted62 = engine.Emit(root62).Trim();
+            Console.WriteLine("Emitted 62:\n" + emitted62);
+            if (emitted62.Contains("\n") || emitted62.Contains("\r"))
+            {
+                Console.WriteLine("FAIL: Expected inline single line remap 'a::b', but got newline:\n" + emitted62);
+                return 1;
+            }
+            if (!emitted62.Equals("a::b"))
+            {
+                Console.WriteLine("FAIL: Expected 'a::b', but got:\n" + emitted62);
+                return 1;
+            }
+
+            // 63. Verify Hotstring executable option parsing (local :X: and global #Hotstring X) with comments
+            string testHsExecSrc = ":X:btw::MyFunc() ; comment 1\n#Hotstring X\n::btw2::MyFunc2() ; comment 2\n";
+            var root63 = engine.Parse(testHsExecSrc);
+            var errors63 = engine.GetErrors(root63);
+            if (errors63.Length > 0)
+            {
+                Console.WriteLine("FAIL: Executable hotstring test parsed with errors: " + string.Join("; ", errors63.Select(e => e.Value)));
+                return 1;
+            }
+            var hotstrings63 = engine.QueryByType(root63, "Hotstring");
+            if (hotstrings63.Length != 2)
+            {
+                Console.WriteLine("FAIL: Expected 2 Hotstrings, but got " + hotstrings63.Length);
+                return 1;
+            }
+            if (hotstrings63[0].ChildCount == 0 || hotstrings63[0].GetChild(0).NodeType != "Call")
+            {
+                Console.WriteLine("FAIL: First hotstring body not parsed as a Call node!");
+                return 1;
+            }
+            if (hotstrings63[1].ChildCount == 0 || hotstrings63[1].GetChild(0).NodeType != "Call")
+            {
+                Console.WriteLine("FAIL: Second hotstring body not parsed as a Call node under global directive!");
+                return 1;
+            }
+            string emitted63 = engine.Emit(root63);
+            Console.WriteLine("Emitted 63:\n" + emitted63);
+            if (!emitted63.Contains(":X:btw:: MyFunc() ; comment 1") || !emitted63.Contains("::btw2:: MyFunc2() ; comment 2"))
+            {
+                Console.WriteLine("FAIL: Executable hotstrings with comments were not emitted correctly:\n" + emitted63);
+                return 1;
+            }
+
+            // 64. Verify unclosed quote continuation with comments and layout preservation
+            string testUnclosedQuoteSrc = "str := \"First part, ; comment\"\n(\n    second part\n)\"\nMsgBox str\n";
+            var root64 = engine.Parse(testUnclosedQuoteSrc);
+            var errors64 = engine.GetErrors(root64);
+            if (errors64.Length > 0)
+            {
+                Console.WriteLine("FAIL: Unclosed quote continuation parsed with errors: " + string.Join("; ", errors64.Select(e => e.Value)));
+                return 1;
+            }
+            var vars64 = engine.QueryByType(root64, "BinaryExpr").Where(n => n.Value == ":=").ToArray();
+            if (vars64.Length != 1)
+            {
+                Console.WriteLine("FAIL: Expected 1 assignment, got " + vars64.Length);
+                return 1;
+            }
+            var strNode = vars64[0].GetChild(1);
+            if (strNode.NodeType != "String")
+            {
+                Console.WriteLine("FAIL: RHS of assignment not parsed as String! Got: " + strNode.NodeType);
+                return 1;
+            }
+            if (strNode.ChildCount == 0 || strNode.GetChild(0).NodeType != "Comment" || !strNode.GetChild(0).Value.Contains("; comment"))
+            {
+                Console.WriteLine("FAIL: Comment inside continuation section was not represented in the tree! Got ChildCount: " + strNode.ChildCount + ", Value: " + (strNode.ChildCount > 0 ? strNode.GetChild(0).Value : "null"));
+                return 1;
+            }
+            string emitted64 = engine.Emit(root64);
+            Console.WriteLine("Emitted 64:\n" + emitted64);
+            if (!emitted64.Contains("; comment"))
+            {
+                Console.WriteLine("FAIL: Comment was not preserved in continuation section. Emitted:\n" + emitted64);
+                return 1;
+            }
+            if (!emitted64.Contains("second part"))
+            {
+                Console.WriteLine("FAIL: Continuation section body was not emitted correctly. Emitted:\n" + emitted64);
+                return 1;
+            }
+            if (!emitted64.Contains("("))
+            {
+                Console.WriteLine("FAIL: Continuation section opening parenthesis was missing. Emitted:\n" + emitted64);
+                return 1;
+            }
+
+            // 65. Verify parenthesized expressions inside assignment continuation are not strings and comments are preserved
+            string testJoinSrc = "a := \"Hello\"\nb := \"world\"\nVar :=\n    ; These get implicitly concatenated\n    (\n        a\n        b\n    )\nMsgBox var\n";
+            var root65 = engine.Parse(testJoinSrc);
+            var errors65 = engine.GetErrors(root65);
+            if (errors65.Length > 0)
+            {
+                Console.WriteLine("FAIL: Join test parsed with errors: " + string.Join("; ", errors65.Select(e => e.Value)));
+                return 1;
+            }
+            var concats65 = engine.QueryByType(root65, "Concat");
+            if (concats65.Length == 0)
+            {
+                Console.WriteLine("FAIL: Expected Concat node for implicit join concatenation!");
+                return 1;
+            }
+            foreach (var concat in concats65)
+            {
+                var left = concat.GetChild(0);
+                var right = concat.GetChild(1);
+                if (left.NodeType == "String" || right.NodeType == "String")
+                {
+                    Console.WriteLine("FAIL: Implicit join variables were incorrectly parsed as String nodes!");
+                    return 1;
+                }
+            }
+
+            var groupedNodes = engine.QueryByType(root65, "Grouped");
+            if (groupedNodes.Length == 0)
+            {
+                Console.WriteLine("FAIL: Expected Grouped node!");
+                return 1;
+            }
+            var groupedNode = groupedNodes[0];
+            var commentNodes = groupedNode.ChildNodes.Where(c => c.NodeType == "Comment").ToArray();
+            if (commentNodes.Length == 0 || !commentNodes[0].Value.Contains("; These get implicitly concatenated"))
+            {
+                Console.WriteLine("FAIL: Comment before parenthesized expression was lost!");
+                return 1;
+            }
+
+            string emitted65 = engine.Emit(root65);
+            Console.WriteLine("Emitted 65:\n" + emitted65);
+            if (!emitted65.Contains("; These get implicitly concatenated"))
+            {
+                Console.WriteLine("FAIL: Comment was not preserved in emitted grouped expression! Emitted:\n" + emitted65);
                 return 1;
             }
 

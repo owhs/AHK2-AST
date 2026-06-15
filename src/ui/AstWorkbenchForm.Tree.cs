@@ -36,7 +36,7 @@ internal partial class AstWorkbenchForm : Form
         var header = new Panel { Dock = DockStyle.Top, Height = 64, BackColor = WbTheme.Mantle, Padding = new Padding(8, 4, 8, 4) };
         var headerLabel = new Label { Text = "SOURCE AST", ForeColor = WbTheme.Subtext0, Font = WbTheme.UISmall, AutoSize = true, Location = new Point(8, 6) };
 
-        _treeStats = new Label { Text = "", ForeColor = WbTheme.Overlay0, Font = WbTheme.UISmall, AutoSize = true, Location = new Point(70, 6) };
+        _treeStats = new Label { Text = "", ForeColor = WbTheme.Overlay0, Font = WbTheme.UISmall, AutoSize = true, Location = new Point(80, 6) };
 
         _treeFilter = new TextBox
         {
@@ -231,6 +231,16 @@ internal partial class AstWorkbenchForm : Form
             int targetCol = ast.Column;
             string searchText = ast.Value;
 
+            if (ast.NodeType == "String" && ast.Metadata != null && ast.Metadata.StartsWith("raw:"))
+            {
+                string raw = ast.Metadata.Substring(4);
+                int firstNewLine = raw.IndexOf('\n');
+                if (firstNewLine >= 0)
+                    searchText = raw.Substring(0, firstNewLine).TrimEnd('\r');
+                else
+                    searchText = raw;
+            }
+
             // Find the file this node belongs to by walking up the tree
             string includeFileName = null;
             TreeNode current = treeNode.Parent;
@@ -418,6 +428,10 @@ internal partial class AstWorkbenchForm : Form
 
         // Build display text
         string display = astNode.NodeType;
+        if (astNode.NodeType == "String" && astNode.Metadata != null && astNode.Metadata.StartsWith("raw:"))
+        {
+            display = "String (Continuation)";
+        }
         if (!string.IsNullOrEmpty(astNode.Value))
         {
             string val = astNode.Value.Length > 50 ? astNode.Value.Substring(0, 50) + "..." : astNode.Value;

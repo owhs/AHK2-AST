@@ -158,7 +158,7 @@ public static class AstEmitter
                 return pad + "return" + (node.ChildCount > 0 ? " " + SafeEmitChild(node, 0, 0) : "");
 
             case "BinaryExpr":
-                return SafeEmitChild(node, 0, 0) + " " + node.Value + " " + SafeEmitChild(node, 1, 0);
+                return SafeEmitChild(node, 0, 0) + " " + node.Value + " " + SafeEmitChild(node, 1, indent);
 
             case "UnaryExpr":
             {
@@ -199,6 +199,10 @@ public static class AstEmitter
 
             case "String":
             {
+                if (node.Metadata != null && node.Metadata.StartsWith("raw:"))
+                {
+                    return node.Metadata.Substring(4);
+                }
                 string val = node.Value;
                 if (!string.IsNullOrEmpty(val) && (val.Contains('\n') || val.Contains('\r')))
                 {
@@ -239,7 +243,24 @@ public static class AstEmitter
                     + SafeEmitChild(node, 1, 0) + " : " + SafeEmitChild(node, 2, 0);
 
             case "Grouped":
+            {
+                var exprNode = node.ChildCount > 0 ? node.GetChild(0) : null;
+                var commentNodes = node.ChildNodes.Skip(1).Where(c => c.NodeType == "Comment").ToArray();
+                bool isMultiLine = (node.EndLine > node.Line) || (commentNodes.Length > 0);
+
+                if (isMultiLine)
+                {
+                    string closePad = MakePad(indent);
+                    string commentsText = commentNodes.Length > 0 
+                        ? " " + string.Join(" ", commentNodes.Select(c => c.Value)) 
+                        : "";
+                    
+                    string innerText = exprNode != null ? EmitNode(exprNode, indent + 1) : "";
+                    return "(" + commentsText + "\n" + innerText + "\n" + closePad + ")";
+                }
+
                 return "(" + SafeEmitChild(node, 0, 0) + ")";
+            }
 
             case "Sequence":
             {
@@ -279,17 +300,27 @@ public static class AstEmitter
             case "Concat":
             {
                 var sb = new StringBuilder();
+                string childPad = MakePad(indent);
                 for (int i = 0; i < node.ChildCount; i++)
                 {
                     var child = node.GetChild(i);
                     if (child == null) continue;
-                    string emitted = EmitNode(child, 0);
-                    if (sb.Length > 0)
+
+                    if (indent > 0)
                     {
-                        string sep = node.Metadata == "nospace" ? "" : " ";
-                        sb.Append(sep);
+                        if (sb.Length > 0) sb.Append("\n");
+                        sb.Append(childPad).Append(EmitNode(child, indent));
                     }
-                    sb.Append(emitted);
+                    else
+                    {
+                        string emitted = EmitNode(child, 0);
+                        if (sb.Length > 0)
+                        {
+                            string sep = node.Metadata == "nospace" ? "" : " ";
+                            sb.Append(sep);
+                        }
+                        sb.Append(emitted);
+                    }
                 }
                 return sb.ToString();
             }
@@ -483,6 +514,14 @@ public static class AstEmitter
                 {
                     if (bodyNode.NodeType == "Block")
                         hbody = " " + EmitNode(bodyNode, indent);
+                    else if (node.Metadata == "inline")
+                    {
+                        string bodyText = EmitNode(bodyNode, 0);
+                        if (bodyNode.NodeType == "Identifier")
+                            hbody = bodyText;
+                        else
+                            hbody = " " + bodyText;
+                    }
                     else
                         hbody = "\n" + EmitNode(bodyNode, indent + 1);
                 }
@@ -493,14 +532,30 @@ public static class AstEmitter
             {
                 var bodyNode = node.ChildCount > 0 ? node.GetChild(0) : null;
                 string hbody = "";
+                string metadata = node.Metadata ?? "";
+                bool isInline = metadata.StartsWith("inline");
                 if (bodyNode != null)
                 {
                     if (bodyNode.NodeType == "Block")
                         hbody = " " + EmitNode(bodyNode, indent);
+                    else if (isInline)
+                    {
+                        string bodyText = EmitNode(bodyNode, 0);
+                        if (bodyNode.NodeType == "Identifier")
+                            hbody = bodyText;
+                        else
+                            hbody = " " + bodyText;
+                    }
                     else
                         hbody = "\n" + EmitNode(bodyNode, indent + 1);
                 }
-                return pad + node.Value + hbody;
+                string commentPart = "";
+                if (metadata.Contains(";"))
+                {
+                    int semiIdx = metadata.IndexOf(';');
+                    commentPart = " " + metadata.Substring(semiIdx + 1);
+                }
+                return pad + node.Value + hbody + commentPart;
             }
 
             case "Declaration":

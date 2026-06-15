@@ -1169,6 +1169,11 @@ namespace AHK2AST.Plugins
             var parent = node.Parent;
             if (parent == null) return true;
 
+            if (parent.NodeType == "Hotkey" || parent.NodeType == "Hotstring")
+            {
+                return false;
+            }
+
             if (parent.NodeType == "KeyValue")
             {
                 return parent.GetChild(1) == node;

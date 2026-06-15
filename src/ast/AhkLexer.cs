@@ -16,6 +16,7 @@ public class AhkLexer
     private List<Token> _tokens;
     private int _tokenStartLine;
     private int _tokenStartCol;
+    private bool _readContinuationSection = false;
 
     private static readonly Dictionary<string, TokenType> Keywords = new Dictionary<string, TokenType>(StringComparer.OrdinalIgnoreCase)
     {
@@ -119,14 +120,28 @@ public class AhkLexer
             // Strings
             if (c == '"')
             {
+                int startPos = _pos;
+                _readContinuationSection = false;
                 string str = ReadDoubleQuotedString();
-                _tokens.Add(new Token(TokenType.String, "\"" + str + "\"", _tokenStartLine, _tokenStartCol));
+                var tok = new Token(TokenType.String, "\"" + str + "\"", _tokenStartLine, _tokenStartCol);
+                if (_readContinuationSection)
+                {
+                    tok.Metadata = "raw:" + _src.Substring(startPos, _pos - startPos);
+                }
+                _tokens.Add(tok);
                 continue;
             }
             if (c == '\'')
             {
+                int startPos = _pos;
+                _readContinuationSection = false;
                 string str = ReadSingleQuotedString();
-                _tokens.Add(new Token(TokenType.String, "'" + str + "'", _tokenStartLine, _tokenStartCol));
+                var tok = new Token(TokenType.String, "'" + str + "'", _tokenStartLine, _tokenStartCol);
+                if (_readContinuationSection)
+                {
+                    tok.Metadata = "raw:" + _src.Substring(startPos, _pos - startPos);
+                }
+                _tokens.Add(tok);
                 continue;
             }
 
@@ -142,10 +157,13 @@ public class AhkLexer
             if (c == '(' && IsStartOfLine())
             {
                 // Check if this is truly a continuation section (next chars aren't expression)
-                if (IsContinuationSection())
+                if (IsContinuationSection() && !PrecededByContinuationOperator())
                 {
+                    int startPos = _pos;
                     string section = ReadContinuationSection();
-                    Emit(TokenType.String, section);
+                    var tok = new Token(TokenType.String, section, _tokenStartLine, _tokenStartCol);
+                    tok.Metadata = "raw:" + _src.Substring(startPos, _pos - startPos);
+                    _tokens.Add(tok);
                     continue;
                 }
             }
@@ -331,22 +349,37 @@ public class AhkLexer
         return _src.Substring(start, _pos - start);
     }
 
-    private string ReadDoubleQuotedString()
+    private bool CheckAndReadContinuationSection(StringBuilder sb)
     {
-        var sb = new StringBuilder();
-        Advance(); // skip opening "
+        // Save position to check if next line starts with (
+        int save = _pos;
+        int saveLine = _line;
+        int saveCol = _col;
 
-        // Check for quoted continuation section: "
-        // (LTrim
-        // ...text...
-        // )"
-        // The " is immediately followed by whitespace/newline, then ( at start of next line
+        // Skip any comments and whitespace on the current line
+        while (_pos < _src.Length && _src[_pos] != '\n' && _src[_pos] != '\r')
+        {
+            if (_src[_pos] == ';')
+            {
+                bool isComment = (_col == 1 || _pos == 0);
+                if (!isComment && _pos > 0)
+                {
+                    char prev = _src[_pos - 1];
+                    if (prev == ' ' || prev == '\t')
+                        isComment = true;
+                }
+                if (isComment)
+                {
+                    while (_pos < _src.Length && _src[_pos] != '\n' && _src[_pos] != '\r')
+                        Advance();
+                    break;
+                }
+            }
+            Advance();
+        }
+
         if (_pos < _src.Length && (_src[_pos] == '\n' || (_src[_pos] == '\r' && _pos + 1 < _src.Length && _src[_pos + 1] == '\n')))
         {
-            // Save position to check if next line starts with (
-            int save = _pos;
-            int saveLine = _line;
-            int saveCol = _col;
             if (_src[_pos] == '\r') Advance();
             if (_pos < _src.Length && _src[_pos] == '\n') Advance();
 
@@ -355,59 +388,147 @@ public class AhkLexer
 
             if (_pos < _src.Length && _src[_pos] == '(')
             {
+                _readContinuationSection = true;
                 // This is a quoted continuation section
                 Advance(); // skip (
 
-                // Skip options on the ( line (LTrim, Join, etc.) and newline
-                while (_pos < _src.Length && _src[_pos] != '\n' && _src[_pos] != '\r') Advance();
+                // Parse options on the ( line (Join, LTrim, etc.)
+                string options = "";
+                while (_pos < _src.Length && _src[_pos] != '\n' && _src[_pos] != '\r')
+                {
+                    options += _src[_pos];
+                    Advance();
+                }
                 if (_pos < _src.Length && _src[_pos] == '\r') Advance();
                 if (_pos < _src.Length && _src[_pos] == '\n') Advance();
+
+                string joinStr = "\n";
+                if (options.IndexOf("Join", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    int idx = options.IndexOf("Join", StringComparison.OrdinalIgnoreCase);
+                    string afterJoin = options.Substring(idx + 4).Trim();
+                    if (afterJoin.Length == 0 || afterJoin.StartsWith("`") || afterJoin.StartsWith(" "))
+                    {
+                        if (afterJoin.Length == 0)
+                        {
+                            joinStr = ""; // Join with nothing
+                        }
+                        else if (afterJoin.StartsWith("`s"))
+                        {
+                            joinStr = " ";
+                        }
+                        else if (afterJoin.StartsWith("`n"))
+                        {
+                            joinStr = "\n";
+                        }
+                        else if (afterJoin.StartsWith("`r"))
+                        {
+                            joinStr = "\r";
+                        }
+                        else if (afterJoin.StartsWith("`t"))
+                        {
+                            joinStr = "\t";
+                        }
+                    }
+                    else
+                    {
+                        // Custom join character
+                        joinStr = afterJoin.Substring(0, 1);
+                    }
+                }
 
                 // Read lines until ) at start of line
                 while (_pos < _src.Length)
                 {
                     // Check for ) at start of line (with optional whitespace)
                     int ls = _pos;
+                    int lsLine = _line;
+                    int lsCol = _col;
                     while (_pos < _src.Length && (_src[_pos] == ' ' || _src[_pos] == '\t'))
                         Advance();
 
                     if (_pos < _src.Length && _src[_pos] == ')')
                     {
                         Advance(); // skip )
-                        // Check for closing " after )
-                        if (_pos < _src.Length && _src[_pos] == '"')
-                            Advance(); // skip closing "
+                        // Check for closing quote after )
+                        if (_pos < _src.Length && (_src[_pos] == '"' || _src[_pos] == '\''))
+                            Advance(); // skip closing quote
                         break;
                     }
 
                     // Not a closing ), rewind and read the whole line
                     _pos = ls;
+                    _line = lsLine;
+                    _col = lsCol;
+                    
+                    var lineContent = new StringBuilder();
                     while (_pos < _src.Length && _src[_pos] != '\n' && _src[_pos] != '\r')
                     {
-                        sb.Append(_src[_pos]);
+                        lineContent.Append(_src[_pos]);
                         Advance();
                     }
-                    sb.Append('\n');
+                    
+                    string lineStr = lineContent.ToString();
+                    bool ltrim = true;
+                    if (options.IndexOf("LTrim0", StringComparison.OrdinalIgnoreCase) >= 0)
+                        ltrim = false;
+                    
+                    if (ltrim)
+                        lineStr = lineStr.TrimStart(' ', '\t');
+
+                    sb.Append(lineStr);
+                    sb.Append(joinStr);
+
                     if (_pos < _src.Length && _src[_pos] == '\r') Advance();
                     if (_pos < _src.Length && _src[_pos] == '\n') Advance();
                 }
 
-                // Trim trailing newline
-                if (sb.Length > 0 && sb[sb.Length - 1] == '\n')
-                    sb.Length--;
+                // Trim trailing join string
+                if (sb.Length >= joinStr.Length && joinStr.Length > 0)
+                {
+                    bool match = true;
+                    for (int j = 0; j < joinStr.Length; j++)
+                    {
+                        if (sb[sb.Length - joinStr.Length + j] != joinStr[j])
+                        {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match)
+                        sb.Length -= joinStr.Length;
+                }
 
-                return sb.ToString();
-            }
-            else
-            {
-                // Not a continuation section, restore position
-                _pos = save;
-                _line = saveLine;
-                _col = saveCol;
+                return true;
             }
         }
 
-        // Normal double-quoted string
+        // Restore position
+        _pos = save;
+        _line = saveLine;
+        _col = saveCol;
+        return false;
+    }
+
+    private string ReadDoubleQuotedString()
+    {
+        var sb = new StringBuilder();
+        Advance(); // skip opening "
+
+        // Check if starts immediately with continuation section
+        int checkPos = _pos;
+        while (checkPos < _src.Length && (_src[checkPos] == ' ' || _src[checkPos] == '\t'))
+        {
+            checkPos++;
+        }
+        if (checkPos < _src.Length && (_src[checkPos] == ';' || _src[checkPos] == '\n' || _src[checkPos] == '\r'))
+        {
+            if (CheckAndReadContinuationSection(sb))
+            {
+                return sb.ToString();
+            }
+        }
+
         while (_pos < _src.Length)
         {
             char c = _src[_pos];
@@ -433,10 +554,46 @@ public class AhkLexer
                     Advance();
                 }
             }
+            else if (c == ';')
+            {
+                // Check if it is a comment start
+                bool isComment = false;
+                if (sb.Length > 0)
+                {
+                    char prev = sb[sb.Length - 1];
+                    if (prev == ' ' || prev == '\t')
+                        isComment = true;
+                }
+                if (isComment)
+                {
+                    // Semicolon starts a comment! Check if next line is continuation section
+                    if (CheckAndReadContinuationSection(sb))
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        sb.Append(c);
+                        Advance();
+                    }
+                }
+                else
+                {
+                    sb.Append(c);
+                    Advance();
+                }
+            }
             else if (c == '\n' || c == '\r')
             {
-                // Newline inside a non-continuation string - end the string
-                break;
+                // Newline - check for continuation section
+                if (CheckAndReadContinuationSection(sb))
+                {
+                    break;
+                }
+                else
+                {
+                    break;
+                }
             }
             else
             {
@@ -452,75 +609,20 @@ public class AhkLexer
         var sb = new StringBuilder();
         Advance(); // skip opening '
 
-        // Check for continuation section: '
-        // (LTrim
-        // ...text...
-        // )'
-        if (_pos < _src.Length && (_src[_pos] == '\n' || (_src[_pos] == '\r' && _pos + 1 < _src.Length && _src[_pos + 1] == '\n')))
+        // Check if starts immediately with continuation section
+        int checkPos = _pos;
+        while (checkPos < _src.Length && (_src[checkPos] == ' ' || _src[checkPos] == '\t'))
         {
-            int save = _pos;
-            int saveLine = _line;
-            int saveCol = _col;
-            if (_src[_pos] == '\r') Advance();
-            if (_pos < _src.Length && _src[_pos] == '\n') Advance();
-
-            // Skip leading whitespace on next line
-            while (_pos < _src.Length && (_src[_pos] == ' ' || _src[_pos] == '\t')) Advance();
-
-            if (_pos < _src.Length && _src[_pos] == '(')
+            checkPos++;
+        }
+        if (checkPos < _src.Length && (_src[checkPos] == ';' || _src[checkPos] == '\n' || _src[checkPos] == '\r'))
+        {
+            if (CheckAndReadContinuationSection(sb))
             {
-                // This is a continuation section
-                Advance(); // skip (
-
-                // Skip options on the ( line and newline
-                while (_pos < _src.Length && _src[_pos] != '\n' && _src[_pos] != '\r') Advance();
-                if (_pos < _src.Length && _src[_pos] == '\r') Advance();
-                if (_pos < _src.Length && _src[_pos] == '\n') Advance();
-
-                // Read lines until ) at start of line
-                while (_pos < _src.Length)
-                {
-                    int ls = _pos;
-                    while (_pos < _src.Length && (_src[_pos] == ' ' || _src[_pos] == '\t'))
-                        Advance();
-
-                    if (_pos < _src.Length && _src[_pos] == ')')
-                    {
-                        Advance(); // skip )
-                        // Check for closing ' after )
-                        if (_pos < _src.Length && _src[_pos] == '\'')
-                            Advance();
-                        break;
-                    }
-
-                    // Not a closing ), rewind and read the whole line
-                    _pos = ls;
-                    while (_pos < _src.Length && _src[_pos] != '\n' && _src[_pos] != '\r')
-                    {
-                        sb.Append(_src[_pos]);
-                        Advance();
-                    }
-                    sb.Append('\n');
-                    if (_pos < _src.Length && _src[_pos] == '\r') Advance();
-                    if (_pos < _src.Length && _src[_pos] == '\n') Advance();
-                }
-
-                // Trim trailing newline
-                if (sb.Length > 0 && sb[sb.Length - 1] == '\n')
-                    sb.Length--;
-
                 return sb.ToString();
-            }
-            else
-            {
-                // Not a continuation section, restore position
-                _pos = save;
-                _line = saveLine;
-                _col = saveCol;
             }
         }
 
-        // Normal single-quoted string
         while (_pos < _src.Length)
         {
             char c = _src[_pos];
@@ -535,10 +637,56 @@ public class AhkLexer
                 else
                     break;
             }
+            else if (c == '`')
+            {
+                Advance();
+                if (_pos < _src.Length)
+                {
+                    sb.Append('`');
+                    sb.Append(_src[_pos]);
+                    Advance();
+                }
+            }
+            else if (c == ';')
+            {
+                // Check if it is a comment start
+                bool isComment = false;
+                if (sb.Length > 0)
+                {
+                    char prev = sb[sb.Length - 1];
+                    if (prev == ' ' || prev == '\t')
+                        isComment = true;
+                }
+                if (isComment)
+                {
+                    // Semicolon starts a comment! Check if next line is continuation section
+                    if (CheckAndReadContinuationSection(sb))
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        sb.Append(c);
+                        Advance();
+                    }
+                }
+                else
+                {
+                    sb.Append(c);
+                    Advance();
+                }
+            }
             else if (c == '\n' || c == '\r')
             {
-                // Newline inside a non-continuation string - end the string
-                break;
+                // Newline - check for continuation section
+                if (CheckAndReadContinuationSection(sb))
+                {
+                    break;
+                }
+                else
+                {
+                    break;
+                }
             }
             else
             {
@@ -601,6 +749,20 @@ public class AhkLexer
             p++;
         return p < _src.Length && (_src[p] == '\n' || _src[p] == '\r');
     }
+
+    private bool PrecededByContinuationOperator()
+    {
+        for (int i = _tokens.Count - 1; i >= 0; i--)
+        {
+            TokenType tt = _tokens[i].Type;
+            if (tt != TokenType.Newline && tt != TokenType.Comment)
+            {
+                return IsContinuationEndOp(tt);
+            }
+        }
+        return false;
+    }
+
 
     private string ReadContinuationSection()
     {

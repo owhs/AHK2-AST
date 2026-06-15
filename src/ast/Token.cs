@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -49,6 +49,7 @@ public class Token
     public string Value;
     public int Line;
     public int Column;
+    public string Metadata;
 
     public Token(TokenType type, string value, int line, int col)
     {
