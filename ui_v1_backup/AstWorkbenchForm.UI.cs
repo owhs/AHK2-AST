@@ -39,6 +39,7 @@ internal partial class AstWorkbenchForm : Form
 
         // File
         var file = new ToolStripMenuItem("&File");
+        file.DropDownItems.Add(MakeMenuItem("&New", Keys.Control | Keys.N, (s, e) => NewFile()));
         file.DropDownItems.Add(MakeMenuItem("&Open File...", Keys.Control | Keys.O, (s, e) => OpenFileDialog()));
         // file.DropDownItems.Add(MakeMenuItem("Open &Folder...", Keys.None, (s, e) => OpenFolderDialog()));
         _recentFilesMenu = new ToolStripMenuItem("Recent &Files");
@@ -51,8 +52,17 @@ internal partial class AstWorkbenchForm : Form
 
         // Parse
         var parse = new ToolStripMenuItem("&Parse");
-        parse.DropDownItems.Add(MakeMenuItem("Parse &Current", Keys.F5, (s, e) => ParseCurrent()));
+        var parseCurrentItem = MakeMenuItem("Parse &Current", Keys.F5, (s, e) => ParseCurrent(false));
+        _parseFromFileItem = MakeMenuItem("Parse from &File", Keys.Control | Keys.F5, (s, e) => ParseCurrent(true));
+        
+        parse.DropDownItems.Add(parseCurrentItem);
+        parse.DropDownItems.Add(_parseFromFileItem);
         parse.DropDownItems.Add(MakeMenuItem("Parse from &Clipboard", Keys.Control | Keys.Shift | Keys.V, (s, e) => ParseClipboard()));
+        
+        parse.DropDownOpening += (s, e) =>
+        {
+            _parseFromFileItem.Enabled = !string.IsNullOrEmpty(_currentFile);
+        };
         //parse.DropDownItems.Add(MakeMenuItem("Run &Security Audit", Keys.Control | Keys.Shift | Keys.A, (s, e) => RunSecurityAudit()));
         parse.DropDownItems.Add(new ToolStripSeparator());
 
@@ -354,7 +364,10 @@ internal partial class AstWorkbenchForm : Form
                 UpdateActiveDocumentPanes();
             }));
         };
-        builder.Show(_dockPanel, DockState.Document);
+        if (_sourceContent != null && !_sourceContent.IsDisposed && _sourceContent.Pane != null)
+            builder.Show(_sourceContent.Pane, null);
+        else
+            builder.Show(_dockPanel, DockState.Document);
         if (!string.IsNullOrEmpty(flowJson))
         {
             builder.LoadFlow(flowJson, filePath);
@@ -446,7 +459,7 @@ internal partial class AstWorkbenchForm : Form
         BuildDiagTabs();
         BuildTraceVisualizerPanel();
 
-        _sourceContent = new DockContent { Text = "Source Editor", BackColor = WbTheme.Base, CloseButtonVisible = false, HideOnClose = true };
+        _sourceContent = new SourceDockContent { Text = "Source Editor", BackColor = WbTheme.Base, CloseButtonVisible = false, HideOnClose = true };
         _sourceContent.FormClosing += (s, e) =>
         {
             if (e.CloseReason == CloseReason.UserClosing)
@@ -464,6 +477,7 @@ internal partial class AstWorkbenchForm : Form
             ForeColor = WbTheme.Text,
             Font = WbTheme.MonoFont,
             BorderStyle = BorderStyle.None,
+            ReadOnly = true,
             WordWrap = _wordWrap,
             AcceptsTab = true,
             DetectUrls = false,
@@ -485,24 +499,24 @@ internal partial class AstWorkbenchForm : Form
             _emitSourceEditorScrollTimer.Start();
         };
 
-        _emitSourceContent = new DockContent { Text = "Emitted Source", BackColor = WbTheme.Base, HideOnClose = true };
+        _emitSourceContent = new EmitSourceDockContent { Text = "Emitted Source", BackColor = WbTheme.Base, HideOnClose = true };
         _emitSourceContent.Controls.Add(_emitSourceEditor);
         // Do not show EmitSourceContent by default, it will be shown when emitting.
 
-        _treeContent = new DockContent { Text = "Source AST", BackColor = WbTheme.Base, HideOnClose = true };
+        _treeContent = new TreeDockContent { Text = "Source AST", BackColor = WbTheme.Base, HideOnClose = true };
         _treeContent.Controls.Add(_treePanel);
         _treeContent.Show(_dockPanel, DockState.DockRight);
 
-        _emitTreeContent = new DockContent { Text = "Emitted AST", BackColor = WbTheme.Base, HideOnClose = true };
+        _emitTreeContent = new EmitTreeDockContent { Text = "Emitted AST", BackColor = WbTheme.Base, HideOnClose = true };
         _emitTreeContent.Controls.Add(_emitTreePanel);
         _emitTreeContent.Show(_dockPanel, DockState.DockRight);
         _emitTreeContent.Hide(); // Hidden by default, shown when emitted source is active
 
-        _diagContentWindow = new DockContent { Text = "Diagnostics", BackColor = WbTheme.Base, HideOnClose = true };
+        _diagContentWindow = new DiagDockContent { Text = "Diagnostics", BackColor = WbTheme.Base, HideOnClose = true };
         _diagContentWindow.Controls.Add(_diagTabs);
         _diagContentWindow.Show(_dockPanel, DockState.DockBottom);
 
-        _traceVisualizerContent = new DockContent { Text = "Trace Visualizer", BackColor = WbTheme.Base, HideOnClose = true };
+        _traceVisualizerContent = new TraceVisualizerDockContent { Text = "Trace Visualizer", BackColor = WbTheme.Base, HideOnClose = true };
         _traceVisualizerContent.Controls.Add(_tracePanel);
         _traceVisualizerContent.Show(_dockPanel, DockState.DockBottom);
         _traceVisualizerContent.Hide();
@@ -515,15 +529,49 @@ internal partial class AstWorkbenchForm : Form
 
     private void UpdateActiveDocumentPanes()
     {
-        if (_dockPanel.ActiveDocument == _sourceContent)
+        var activeDoc = GetTopLevelDocument(_dockPanel.ActiveDocument);
+
+        if (activeDoc == _sourceContent)
         {
             _emitTreeContent.Hide();
             _treeContent.Show(_dockPanel, DockState.DockRight);
+
+            // Restore Emitted Source if it was visible before hiding
+            if (_emitSourceWasVisible && _emitSourceContent != null && !_emitSourceContent.IsDisposed && _emitSourceContent.IsHidden)
+            {
+                try
+                {
+                    if (_sourceContent != null && !_sourceContent.IsDisposed && _sourceContent.Pane != null)
+                    {
+                        _emitSourceContent.Show(_sourceContent.Pane, DockAlignment.Right, 0.5);
+                    }
+                    else
+                    {
+                        _emitSourceContent.Show(_dockPanel, DockState.Document);
+                    }
+                }
+                catch { }
+            }
         }
-        else if (_dockPanel.ActiveDocument == _emitSourceContent)
+        else if (activeDoc == _emitSourceContent)
         {
             _treeContent.Hide();
             _emitTreeContent.Show(_dockPanel, DockState.DockRight);
+        }
+        else if (activeDoc is PipelineBuilderContent || activeDoc is DiffWorkspaceContent || activeDoc is EscaperUnescaperContent || activeDoc is NimBuildContent)
+        {
+            // Save visibility state of Emitted Source before hiding it
+            if (_emitSourceContent != null && !_emitSourceContent.IsDisposed)
+            {
+                _emitSourceWasVisible = !_emitSourceContent.IsHidden;
+                try
+                {
+                    _emitSourceContent.Hide();
+                }
+                catch { }
+            }
+            _treeContent.Hide();
+            _emitTreeContent.Hide();
         }
         else
         {
@@ -531,7 +579,7 @@ internal partial class AstWorkbenchForm : Form
             _emitTreeContent.Hide();
         }
 
-        var pb = _dockPanel.ActiveDocument as PipelineBuilderContent;
+        var pb = activeDoc as PipelineBuilderContent;
         if (pb != null && !pb.IsDisposed && !pb.Disposing)
         {
             pb.Refresh();
@@ -555,19 +603,30 @@ internal partial class AstWorkbenchForm : Form
                 ScrollBars = _wordWrap ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.Both
             };
             _emitSourceEditor.HandleCreated += (s, e) => SetWindowTheme(_emitSourceEditor.Handle, "DarkMode_Explorer", null);
-            _emitSourceContent = new DockContent { Text = "Emitted Source", BackColor = WbTheme.Base, HideOnClose = true };
+            _emitSourceContent = new EmitSourceDockContent { Text = "Emitted Source", BackColor = WbTheme.Base, HideOnClose = true };
             _emitSourceContent.Controls.Add(_emitSourceEditor);
         }
         _emitSourceEditor.Clear();
         _emitSourceEditor.Text = content;
-        _emitSourceContent.Show(_dockPanel, DockState.Document);
+        
+        if (_emitSourceContent.DockState == DockState.Unknown || _emitSourceContent.DockState == DockState.Hidden)
+        {
+            if (_sourceContent != null && !_sourceContent.IsDisposed && _sourceContent.Pane != null)
+            {
+                _emitSourceContent.Show(_sourceContent.Pane, DockAlignment.Right, 0.5);
+            }
+            else
+            {
+                _emitSourceContent.Show(_dockPanel, DockState.Document);
+            }
+        }
         _emitSourceContent.Activate();
         HighlightControl(_emitSourceEditor);
     }
 
     private void CloseActiveTab()
     {
-        var activeDoc = _dockPanel.ActiveDocument as DockContent;
+        var activeDoc = GetTopLevelDocument(_dockPanel.ActiveDocument) as DockContent;
         if (activeDoc != null)
         {
             if (activeDoc.CloseButtonVisible || activeDoc is PipelineBuilderContent || activeDoc == _emitSourceContent)
@@ -973,6 +1032,12 @@ internal partial class AstWorkbenchForm : Form
     {
         if (c.A == 0) return c;
 
+        // Force document/pane borders/outlines/separators to blend into the mantle/background
+        if (propName.Contains("Border") || propName.Contains("Outline") || propName.Contains("Separator") || propName.Contains("Splitter"))
+        {
+            return isDark ? mantle : surf1;
+        }
+
         // Ensure text/glyphs never get mapped to surface background colors due to brightness rules
         if (propName.Contains("Text") || propName.Contains("Glyph") || propName.Contains("Arrow"))
         {
@@ -1055,12 +1120,18 @@ internal partial class AstWorkbenchForm : Form
             var diffDoc = doc as DiffWorkspaceContent;
             if (diffDoc != null)
             {
-                diffDoc.Show(_dockPanel);
+                if (_sourceContent != null && !_sourceContent.IsDisposed && _sourceContent.Pane != null)
+                    diffDoc.Show(_sourceContent.Pane, null);
+                else
+                    diffDoc.Show(_dockPanel);
                 return diffDoc;
             }
         }
         var newDiff = new DiffWorkspaceContent();
-        newDiff.Show(_dockPanel, DockState.Document);
+        if (_sourceContent != null && !_sourceContent.IsDisposed && _sourceContent.Pane != null)
+            newDiff.Show(_sourceContent.Pane, null);
+        else
+            newDiff.Show(_dockPanel, DockState.Document);
         UpdateControlTheme(newDiff);
         return newDiff;
     }
@@ -1072,12 +1143,18 @@ internal partial class AstWorkbenchForm : Form
             var escDoc = doc as EscaperUnescaperContent;
             if (escDoc != null)
             {
-                escDoc.Show(_dockPanel);
+                if (_sourceContent != null && !_sourceContent.IsDisposed && _sourceContent.Pane != null)
+                    escDoc.Show(_sourceContent.Pane, null);
+                else
+                    escDoc.Show(_dockPanel);
                 return escDoc;
             }
         }
         var newEsc = new EscaperUnescaperContent();
-        newEsc.Show(_dockPanel, DockState.Document);
+        if (_sourceContent != null && !_sourceContent.IsDisposed && _sourceContent.Pane != null)
+            newEsc.Show(_sourceContent.Pane, null);
+        else
+            newEsc.Show(_dockPanel, DockState.Document);
         UpdateControlTheme(newEsc);
         return newEsc;
     }
@@ -1166,13 +1243,19 @@ internal partial class AstWorkbenchForm : Form
             var buildDoc = doc as NimBuildContent;
             if (buildDoc != null)
             {
-                buildDoc.Show(_dockPanel);
+                if (_sourceContent != null && !_sourceContent.IsDisposed && _sourceContent.Pane != null)
+                    buildDoc.Show(_sourceContent.Pane, null);
+                else
+                    buildDoc.Show(_dockPanel);
                 buildDoc.Activate();
                 return;
             }
         }
         var newBuild = new NimBuildContent(() => _sourceEditor.Text, () => _currentFile, _engine);
-        newBuild.Show(_dockPanel, DockState.Document);
+        if (_sourceContent != null && !_sourceContent.IsDisposed && _sourceContent.Pane != null)
+            newBuild.Show(_sourceContent.Pane, null);
+        else
+            newBuild.Show(_dockPanel, DockState.Document);
         UpdateControlTheme(newBuild);
         newBuild.Activate();
     }

@@ -290,7 +290,7 @@ y() {
                 Console.WriteLine("FAIL: Chained declaration was corrupted in emission!");
                 return 1;
             }
-            if (!emittedDecl.Contains("global a") || !emittedDecl.Contains("global b := 1") || !emittedDecl.Contains("global c"))
+            if (!emittedDecl.Contains("global a, b := 1, c")) // one statement, as written
             {
                 Console.WriteLine("FAIL: Chained declarations did not emit variables correctly!");
                 return 1;
@@ -1399,7 +1399,7 @@ z := undefinedVar + 1  ; UndefinedVar warning
             shakerParen.Execute(pruningParenNode);
             string pruningParenEmit = engine.Emit(pruningParenNode).Trim();
             Console.WriteLine("Emitted tree-shaker pruned paren: " + pruningParenEmit);
-            if (!pruningParenEmit.Contains("(1 + (CALG_AES_192 := 0x660E))"))
+            if (!pruningParenEmit.Contains("(1 + (CALG_AES_192 := 0x660E))") && !pruningParenEmit.Contains("(1 + CALG_AES_192 := 0x660E)")) // AHK groups both the same
             {
                 Console.WriteLine("FAIL: Tree-shaking pruning did not wrap side-effect-ful RHS in parentheses: " + pruningParenEmit);
                 return 1;
@@ -1455,7 +1455,7 @@ z := undefinedVar + 1  ; UndefinedVar warning
             shakerNested.Execute(nestedSeqPruningNode);
             string nestedSeqPruningEmit = engine.Emit(nestedSeqPruningNode).Trim();
             Console.WriteLine("Emitted tree-shaker pruned nested sequence:\n" + nestedSeqPruningEmit);
-            if (!nestedSeqPruningEmit.Contains("(1 + (sideEffectVar := 2))"))
+            if (!nestedSeqPruningEmit.Contains("(1 + (sideEffectVar := 2))") && !nestedSeqPruningEmit.Contains("(1 + sideEffectVar := 2)")) // AHK groups both the same
             {
                 Console.WriteLine("FAIL: Tree-shaking nested sequence pruning did not wrap RHS in parentheses: " + nestedSeqPruningEmit);
                 return 1;
@@ -2330,14 +2330,19 @@ MyCallback(ctrl, info) {
             }
             string emitted61 = engine.Emit(root61).Trim();
             Console.WriteLine("Emitted 61:\n" + emitted61);
-            if (!emitted61.Contains("x == y && (z := 1)"))
+            // A line starting `x == ...` is a function-call statement to AHK (x(== ...)), a load error; the emitter
+            // parenthesises such a leading name (StatementHead), which keeps the expression meaning.
+            // The AST records AHK's grouping (x == y && (z := 1), not (x := y)) as implicit groups, and a 1:1 emit
+            // writes them the way the source did, which AHK groups the same way again.
+            if (!emitted61.Contains("x == y && z := 1") || !emitted61.Contains("not x := y")) // 1:1: heads as written
             {
-                Console.WriteLine("FAIL: Expected 'x == y && (z := 1)', but got:\n" + emitted61);
+                Console.WriteLine("FAIL: Expected 'x == y && z := 1' and 'not x := y', but got:\n" + emitted61);
                 return 1;
             }
-            if (!emitted61.Contains("not (x := y)"))
+            var implicit61 = engine.QueryByType(root61, "Grouped").Where(g => g.Metadata == "implicit").ToArray();
+            if (implicit61.Length != 2 || implicit61.Any(g => g.GetChild(0).NodeType != "BinaryExpr" || g.GetChild(0).Value != ":="))
             {
-                Console.WriteLine("FAIL: Expected 'not (x := y)', but got:\n" + emitted61);
+                Console.WriteLine("FAIL: Expected two implicit groups around the raised assignments, got " + implicit61.Length);
                 return 1;
             }
 
@@ -2466,17 +2471,13 @@ MyCallback(ctrl, info) {
                 }
             }
 
-            var groupedNodes = engine.QueryByType(root65, "Grouped");
-            if (groupedNodes.Length == 0)
+            // A continuation section in an expression is joined as text, not grouped: AutoHotkey 2.0.19 evaluates
+            // `x := 2 *` ⏎ `(` ⏎ `1 + 1` ⏎ `)` to 3, not 4 (see harness\cases\continuation_sections.ahk), so there is no
+            // Grouped node. The comment line before the section must still survive as a Comment node.
+            var commentNodes = engine.QueryByType(root65, "Comment").Where(c => c.Value.Contains("; These get implicitly concatenated")).ToArray();
+            if (commentNodes.Length == 0)
             {
-                Console.WriteLine("FAIL: Expected Grouped node!");
-                return 1;
-            }
-            var groupedNode = groupedNodes[0];
-            var commentNodes = groupedNode.ChildNodes.Where(c => c.NodeType == "Comment").ToArray();
-            if (commentNodes.Length == 0 || !commentNodes[0].Value.Contains("; These get implicitly concatenated"))
-            {
-                Console.WriteLine("FAIL: Comment before parenthesized expression was lost!");
+                Console.WriteLine("FAIL: Comment before the continuation section was lost!");
                 return 1;
             }
 

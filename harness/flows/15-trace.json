@@ -1,0 +1,21 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ]
+  },
+  "Meta": {
+    "Name": "Trace wrapper (functions, classes, events)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Trace Wrapper",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.TraceWrapperConfig",
+      "ConfigJson": "{\"TraceFilePath\":\"${OutputDir}\\\\__trace_dump.json\"}"
+    }
+  ]
+}

@@ -156,7 +156,7 @@ namespace AHK2AST.Plugins
                     int bodyIdx = -1;
                     for (int j = child.ChildCount - 1; j >= 0; j--)
                     {
-                        if (child.GetChild(j) != null && child.GetChild(j).NodeType != "Until")
+                        if (child.GetChild(j) != null && child.GetChild(j).NodeType != "Until" && child.GetChild(j).NodeType != "Else")
                         {
                             bodyIdx = j;
                             break;
@@ -221,6 +221,9 @@ namespace AHK2AST.Plugins
                                     argsNode.ReplaceChild(0, text);
                                     argsNode.ReplaceChild(1, title);
                                     argsNode.ReplaceChild(2, options);
+                                    // A rewritten call is emitted in explicit v2 form: MsgBox(Text, Title, Options)
+                                    argsNode.Metadata = "";
+                                    child.Metadata = "";
                                     _fixedMsgBoxCount++;
                                 }
                             }

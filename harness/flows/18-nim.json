@@ -1,0 +1,22 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ],
+    "Validate": false
+  },
+  "Meta": {
+    "Name": "Nim transpiler (output not AHK; crash/hang only)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Nim Transpiler",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.NimTranspilerConfig",
+      "ConfigJson": "{\"AddImports\":true,\"OutputPath\":\"\",\"IncludeDebugging\":true}"
+    }
+  ]
+}

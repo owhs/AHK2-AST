@@ -30,15 +30,30 @@ internal partial class AstWorkbenchForm : Form
 
     private bool _isParsing;
 
-    private void ParseCurrent()
+    private void ParseCurrent(bool forceFromFile = false)
     {
-        if (_dockPanel.ActiveDocument == _emitSourceContent)
+        if (GetTopLevelDocument(_dockPanel.ActiveDocument) == _emitSourceContent)
         {
             ParseEmittedCode();
             return;
         }
 
         if (_isParsing) return;
+
+        if (forceFromFile && !string.IsNullOrEmpty(_currentFile) && File.Exists(_currentFile))
+        {
+            try
+            {
+                _sourceEditor.Text = File.ReadAllText(_currentFile, Encoding.UTF8);
+                _sourceEditorIsInlined = false;
+                HighlightControl(_sourceEditor);
+            }
+            catch (Exception ex)
+            {
+                _statusLabel.Text = "Error reading file: " + ex.Message;
+                return;
+            }
+        }
 
         string source = _sourceEditor.Text;
         if (string.IsNullOrEmpty(source))
@@ -88,7 +103,7 @@ internal partial class AstWorkbenchForm : Form
             var engine = new AhkAstEngine();
             AstNode ast;
             if (followIncludes && !string.IsNullOrEmpty(currentFile))
-                ast = engine.ParseFileWithIncludes(currentFile, true);
+                ast = engine.ParseSourceWithIncludes(source, currentFile, true);
             else
                 ast = engine.Parse(source);
 
@@ -367,7 +382,7 @@ internal partial class AstWorkbenchForm : Form
             _statusLabel.ForeColor = WbTheme.Green;
 
             // Show Emit Tree if we are looking at the Emitted Source
-            if (_dockPanel.ActiveDocument == _emitSourceContent)
+            if (GetTopLevelDocument(_dockPanel.ActiveDocument) == _emitSourceContent)
             {
                 _treeContent.Hide();
                 _emitTreeContent.Show(_dockPanel, DockState.DockRight);
@@ -424,7 +439,15 @@ internal partial class AstWorkbenchForm : Form
         visited.Add(fullPath);
         allIncluded.Add(fileName);
         allIncluded.Add(fullPath);
-        string[] lines = File.ReadAllLines(fullPath, Encoding.UTF8);
+        string[] lines;
+        if (!string.IsNullOrEmpty(_currentFile) && string.Equals(fullPath, Path.GetFullPath(_currentFile), StringComparison.OrdinalIgnoreCase))
+        {
+            lines = _sourceEditor.Text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+        }
+        else
+        {
+            lines = File.ReadAllLines(fullPath, Encoding.UTF8);
+        }
         var sb = new StringBuilder();
 
         string includeDir = Path.GetDirectoryName(fullPath);

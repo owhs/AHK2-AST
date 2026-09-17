@@ -89,7 +89,7 @@ public class AstPluginManager
     public List<PipelineStepResult> RunPipeline(AstNode root)
     {
         var results = new List<PipelineStepResult>();
-        results.Add(new PipelineStepResult { StepName = "Original", Snapshot = root.Clone(), Output = root });
+        AstNode originalSnapshot;
 
         object currentData = root;
 
@@ -116,13 +116,13 @@ public class AstPluginManager
                     }
                     PipelineLogger.Log("  Executing plugin: {0}", plugin.Name);
                     var stepSw = System.Diagnostics.Stopwatch.StartNew();
-                    currentData = plugin.Execute(currentNode);
+                    using (Prof.Time("plugin." + plugin.Name)) currentData = plugin.Execute(currentNode);
                     stepSw.Stop();
                     PipelineLogger.Log("  Plugin {0} completed successfully in {1}ms.", plugin.Name, stepSw.ElapsedMilliseconds);
                     var result = new PipelineStepResult { StepName = plugin.Name, Output = currentData };
                     if (currentData is AstNode) 
                     {
-                        result.Snapshot = ((AstNode)currentData).Clone();
+                        using (Prof.Time("pipeline.snapshot")) result.Snapshot = ((AstNode)currentData).Clone();
                     }
                     results.Add(result);
                 }

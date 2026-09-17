@@ -1,0 +1,17 @@
+{
+  "Harness": {
+    "Modes": [
+      "local",
+      "inline"
+    ],
+    "Idempotent": true,
+    "AstEquiv": true
+  },
+  "Meta": {
+    "Name": "Round-trip (parse + emit)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": []
+}

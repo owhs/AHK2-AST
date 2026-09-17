@@ -1,0 +1,20 @@
+# Scan roots: <tier> <folder>. The most specific root wins, so a sub-folder can be re-tiered.
+# Tiers:
+#   core       real scripts (projects, apps, downloads, AutoHotkey's own UX scripts) — the main loop target
+#   converter  AHK-v2-script-converter test expectations (.ah2) — thousands of small v2 edge cases
+#   history    editor local-history snapshots / backups — huge, near-duplicate, broad sweeps only
+# Environment variables are expanded. Run "harness.ps1 scan" after editing.
+
+core       C:\projects\ahk
+core       C:\projects\BingeKit
+core       C:\Apps\AHK
+core       C:\Program Files\AutoHotkey\UX
+core       %USERPROFILE%\Downloads
+core       %USERPROFILE%\Documents\AutoHotkey
+
+converter  C:\Apps\AHK\AHK-v2-script-converter-master
+
+history    C:\projects\ahk\~backup
+history    %APPDATA%\Code\User\History
+history    %APPDATA%\Antigravity\User\History
+history    %APPDATA%\Antigravity IDE\User\History

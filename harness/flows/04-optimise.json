@@ -1,0 +1,21 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ]
+  },
+  "Meta": {
+    "Name": "Optimise (defaults)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Optimise",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.OptimiseConfig",
+      "ConfigJson": "{}"
+    }
+  ]
+}

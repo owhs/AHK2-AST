@@ -433,7 +433,13 @@ namespace AHK2AST.Plugins
 
         private AstNode FindConstructor(AstNode classNode)
         {
-            if (classNode == null) return null;
+            return FindConstructor(classNode, new HashSet<AstNode>());
+        }
+
+        // class Error extends Error (nested, named after its global base) resolves to itself: visit each class once.
+        private AstNode FindConstructor(AstNode classNode, HashSet<AstNode> seen)
+        {
+            if (classNode == null || !seen.Add(classNode)) return null;
             var methods = classNode.ChildNodes.Where(c => c != null && c.NodeType == "Method").ToArray();
             var newMethod = methods.FirstOrDefault(m => m.Value.Equals("__New", StringComparison.OrdinalIgnoreCase));
             if (newMethod != null) return newMethod;
@@ -442,16 +448,22 @@ namespace AHK2AST.Plugins
             if (extendsNode == null || string.IsNullOrEmpty(extendsNode.Value)) return null;
 
             var baseClassNode = _classNodes.FirstOrDefault(c => NormalizeIdentifier(c.Value).Equals(NormalizeIdentifier(extendsNode.Value), StringComparison.OrdinalIgnoreCase));
-            return FindConstructor(baseClassNode);
+            return FindConstructor(baseClassNode, seen);
         }
 
         private int GetInheritanceDepth(string className)
         {
+            return GetInheritanceDepth(className, 0);
+        }
+
+        private int GetInheritanceDepth(string className, int guard)
+        {
+            if (guard > 64) return guard; // a class resolving to itself (class Error extends Error)
             var node = _classNodes.FirstOrDefault(c => NormalizeIdentifier(c.Value).Equals(className, StringComparison.OrdinalIgnoreCase));
             if (node == null) return 0;
             var extendsNode = node.ChildNodes.FirstOrDefault(c => c != null && c.NodeType == "Extends");
             if (extendsNode == null || string.IsNullOrEmpty(extendsNode.Value)) return 0;
-            return 1 + GetInheritanceDepth(NormalizeIdentifier(extendsNode.Value));
+            return 1 + GetInheritanceDepth(NormalizeIdentifier(extendsNode.Value), guard + 1);
         }
 
         private string GenerateForwardDeclarations()
@@ -1059,9 +1071,26 @@ namespace AHK2AST.Plugins
             return true;
         }
 
+        /// <summary>Exception raised while emitting a node, tagged with the innermost node that failed.</summary>
+        private class NimEmitException : Exception
+        {
+            public NimEmitException(AstNode node, Exception inner)
+                : base("Nim emit failed at " + node.NodeType + " (line " + node.Line + ", " + node.ChildCount + " children): " + inner.Message, inner) { }
+        }
+
         private string EmitNode(AstNode node, int indent, bool isStatement = false)
         {
             if (node == null) return "";
+            try
+            {
+                return EmitNodeCore(node, indent, isStatement);
+            }
+            catch (NimEmitException) { throw; }
+            catch (Exception ex) { throw new NimEmitException(node, ex); }
+        }
+
+        private string EmitNodeCore(AstNode node, int indent, bool isStatement)
+        {
             string pad = MakePad(indent);
 
             switch (node.NodeType)
@@ -1466,13 +1495,13 @@ namespace AHK2AST.Plugins
                 case "Loop":
                     {
                         string variant = !string.IsNullOrEmpty(node.Value) ? node.Value.ToLowerInvariant() : "";
-                        var bodyNode = node.ChildNodes.LastOrDefault();
+                        var bodyNode = node.ChildNodes.LastOrDefault(c => c != null && c.NodeType != "Until" && c.NodeType != "Else");
                         
                         var args = new List<string>();
-                        for (int i = 0; i < node.ChildCount - 1; i++)
+                        for (int i = 0; i < node.ChildCount; i++)
                         {
                             var child = node.GetChild(i);
-                            if (child != null && child.NodeType != "Until")
+                            if (child != null && child != bodyNode && child.NodeType != "Until" && child.NodeType != "Else")
                             {
                                 args.Add(EmitNode(child, 0));
                             }
@@ -1545,7 +1574,7 @@ namespace AHK2AST.Plugins
                             {
                                 foreach (var c in fvarsNode.ChildNodes)
                                 {
-                                    _declaredVars.Add(NormalizeIdentifier(c.Value));
+                                    if (c.NodeType != "Omitted") _declaredVars.Add(NormalizeIdentifier(c.Value));
                                 }
                             }
                             else if (fvarsNode.NodeType == "Identifier")
@@ -1574,7 +1603,7 @@ namespace AHK2AST.Plugins
                         var list = new List<string>();
                         foreach (var c in node.ChildNodes)
                         {
-                            list.Add(EmitNode(c, 0));
+                            if (c.NodeType != "Omitted") list.Add(EmitNode(c, 0)); // Nim has no omitted loop vars
                         }
                         return string.Join(", ", list);
                     }
@@ -1587,6 +1616,9 @@ namespace AHK2AST.Plugins
 
                 case "Continue":
                     return pad + "continue";
+
+                case "Goto":
+                    return pad + "discard # unsupported: goto " + node.Value;
 
                 case "Class":
                     {
@@ -1923,9 +1955,12 @@ namespace AHK2AST.Plugins
 
                 case "Index":
                     {
+                        // AHK allows obj[] (no index) and obj[a, b]; mirror them rather than crash or drop indices
+                        // (single-index access is what AhkStdLib implements; the others fail visibly in Nim).
                         string obj = EmitNode(node.GetChild(0), 0);
-                        string idx = EmitNode(node.GetChild(1), 0);
-                        return obj + "[" + idx + "]";
+                        var indices = new List<string>();
+                        for (int ii = 1; ii < node.ChildCount; ii++) indices.Add(EmitNode(node.GetChild(ii), 0));
+                        return obj + "[" + string.Join(", ", indices) + "]";
                     }
 
                 case "FatArrow":

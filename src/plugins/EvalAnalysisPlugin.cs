@@ -192,234 +192,14 @@ namespace AHK2AST.Plugins
             "if", "else", "loop", "while", "for", "in", "switch", "case", "default", "try", "catch", "finally",
             "throw", "break", "continue", "return", "global", "local", "static", "class", "extends", "new",
             "as", "until", "unset", "and", "or", "not", "is", "true", "false", "this", "super",
-
-            // AHK v2 Built-in Variables
-            "A_AhkPath", "A_AhkVersion", "A_AppData", "A_AppDataCommon", "A_Args", "A_AllowAdminTemplates",
-            "A_Clipboard", "A_ComputerName", "A_ComSpec", "A_ControlDelay", "A_CoordModeCaret", "A_CoordModeMenu",
-            "A_CoordModeMouse", "A_CoordModePixel", "A_CoordModeToolTip", "A_Cursor", "A_DefaultMouseSpeed",
-            "A_Desktop", "A_DesktopCommon", "A_DetectHiddenText", "A_DetectHiddenWindows", "A_EndChar",
-            "A_EventInfo", "A_ExitReason", "A_FileEncoding", "A_HotkeyInterval", "A_HotkeyModifierTimeout",
-            "A_Hour", "A_IconFile", "A_IconHidden", "A_IconNumber", "A_IconTip", "A_Index", "A_InitialWorkingDir",
-            "A_IsAdmin", "A_IsCritical", "A_IsCompiled", "A_IsPaused", "A_IsSuspended", "A_IsUnicode",
-            "A_KeyDelay", "A_KeyDelayPlay", "A_KeyDuration", "A_KeyDurationPlay", "A_Language", "A_LastError",
-            "A_LineFile", "A_LineNumber", "A_ListLines", "A_LoopField", "A_LoopFileAttrib", "A_LoopFileDir",
-            "A_LoopFileExt", "A_LoopFileFullPath", "A_LoopFileName", "A_LoopFileShortPath", "A_LoopFileSize",
-            "A_LoopFileSizeKB", "A_LoopFileSizeMB", "A_LoopFileTimeAccessed", "A_LoopFileTimeCreated",
-            "A_LoopFileTimeModified", "A_LoopReadLine", "A_LoopRegKey", "A_LoopRegName", "A_LoopRegTimeModified",
-            "A_LoopRegType", "A_MaxHotkeysPerInterval", "A_MenuMaskKey", "A_Min", "A_Mon", "A_MouseDelay",
-            "A_MouseDelayPlay", "A_MSec", "A_MyDocuments", "A_Now", "A_NowUTC", "A_OSVersion",
-            "A_Paused", "A_PriorHotkey", "A_PriorKey", "A_Programs", "A_ProgramsCommon", "A_PtrSize",
-            "A_RegView", "A_ScreenHeight", "A_ScreenWidth", "A_ScriptDir", "A_ScriptFullPath", "A_ScriptName",
-            "A_Sec", "A_SendLevel", "A_SendMode", "A_StoreCapsLockMode", "A_Startup", "A_StartupCommon",
-            "A_StartMenu", "A_StartMenuCommon", "A_Suspended", "A_SystemButtons", "A_Temp", "A_ThisForm",
-            "A_ThisHotkey", "A_ThisLabel", "A_ThisMenu", "A_ThisMenuItem", "A_ThisMenuItemPos", "A_TickCount",
-            "A_TimeIdle", "A_TimeIdlePhysical", "A_TimeIdleKeyboard", "A_TimeIdleMouse", "A_TimeSincePriorHotkey",
-            "A_TimeSinceThisHotkey", "A_TitleMatchMode", "A_TitleMatchModeSpeed", "A_TrayMenu", "A_UserName",
-            "A_WDAY", "A_WinDelay", "A_WinDir", "A_WorkingDir", "A_YDAY", "A_Year", "A_YWeek",
-
-            // AHK v2 Built-in Functions
-            "ControlAddItem", "ControlChooseIndex", "ControlChooseString", "ControlClick", "ControlDeleteItem",
-            "ControlFindItem", "ControlFocus", "ControlGetChoice", "ControlGetClassNN", "ControlGetEnabled",
-            "ControlGetFocus", "ControlGetHwnd", "ControlGetIndex", "ControlGetPos", "ControlGetStyle",
-            "ControlGetExStyle", "ControlGetText", "ControlGetVisible", "ControlHide", "ControlHideDropDown",
-            "ControlMove", "ControlSend", "ControlSendText", "ControlSetChecked", "ControlSetEnabled",
-            "ControlSetStyle", "ControlSetExStyle", "ControlSetText", "ControlShow", "ControlShowDropDown",
-            "MenuSelect", "MsgBox", "InputBox", "ToolTip", "TrayTip", "DirCopy", "DirCreate",
-            "DirDelete", "DirExist", "DirMove", "DirSelect", "FileAppend", "FileCopy", "FileCreateShortcut",
-            "FileDelete", "FileEncoding", "FileExist", "FileGetAttrib", "FileGetShortcut", "FileGetSize",
-            "FileGetTime", "FileGetVersion", "FileInstall", "FileMove", "FileOpen", "FileRead",
-            "FileRecycle", "FileRecycleEmpty", "FileSelect", "FileSetAttrib", "FileSetTime", "RegDelete",
-            "RegDeleteKey", "RegWrite", "RegRead", "WinActivate", "WinActivateBottom", "WinActive",
-            "WinClose", "WinExist", "WinGetClass", "WinGetClientPos", "WinGetControls", "WinGetControlsHwnd",
-            "WinGetCount", "WinGetID", "WinGetIDLast", "WinGetList", "WinGetMinMax", "WinGetPID",
-            "WinGetPos", "WinGetClientPos", "WinSetTitle", "WinSetAlwaysOnTop", "WinSetEnabled", "WinSetStyle",
-            "WinSetExStyle", "WinSetRegion", "WinSetTransColor", "WinSetTransparent", "WinShow", "WinWait",
-            "WinWaitActive", "WinWaitClose", "WinWaitNotActive", "ProcessClose", "ProcessExist", "ProcessGetName",
-            "ProcessGetPath", "ProcessSetPriority", "ProcessWait", "ProcessWaitClose", "Abs", "Ceil",
-            "Cos", "Exp", "Floor", "Log", "Ln", "Max", "Min", "Mod", "Random",
-            "Round", "Sin", "Sqrt", "Tan", "ASin", "ACos", "ATan", "Chr",
-            "Format", "InStr", "LoadPicture", "Ord", "RegExMatch", "RegExReplace", "StrCompare",
-            "StrGet", "StrLen", "StrLower", "StrPtr", "StrPut", "StrReplace", "StrSplit",
-            "StrUpper", "SubStr", "Trim", "LTrim", "RTrim", "Buffer", "CallbackCreate",
-            "CallbackFree", "DllCall", "NumGet", "NumPut", "ObjBindMethod", "VarSetStrCapacity",
-            "Array", "Map", "Object", "Class", "Func", "Struct", "Type", "Hotkey",
-            "Hotstring", "HotIf", "HotIfWinActive", "HotIfWinExist", "HotIfWinNotActive", "HotIfWinNotExist",
-            "ClipWait", "KeyWait", "MouseClick", "MouseClickDrag", "MouseGetPos", "MouseMove", "Send",
-            "SendMode", "SendLevel", "SendMessage", "PostMessage", "OnMessage", "OnExit", "OnError",
-            "SetTimer", "Sleep", "Shutdown", "Exit", "ExitApp", "Run", "RunWait",
-            "EnvGet", "EnvSet", "SysGet", "SysGetIPAddresses", "MonitorGet", "MonitorGetCount",
-            "MonitorGetName", "MonitorGetPrimary", "MonitorGetWorkArea", "SoundBeep", "SoundPlay",
-            "SoundGetVolume", "SoundSetVolume", "SoundGetMute", "SoundSetMute", "ImageSearch", "PixelGetColor",
-            "PixelSearch", "BlockInput", "CoordMode", "IniDelete", "IniWrite", "DirSelect", "FileSelect",
-            "ControlGetHwnd", "GuiFromHwnd", "GuiCtrlFromHwnd", "Menu", "MenuBar", "InputHook",
-
-            // Built-in Object Methods
-            "HasMethod", "HasProp", "HasVal", "ObjHasOwnProp", "ObjOwnPropCount", "ObjOwnProps",
-            "ObjAddRef", "ObjRelease", "ObjPtr", "ObjPtrAddRef", "ObjGetBase", "ObjSetBase",
-            "WinGetProcessName", "WinGetProcessPath", "WinGetText", "WinGetTitle",
-
-            // Extended built-in classes, functions, and exception classes to silence UndefinedVar warnings
-            "Integer", "String", "Float", "Number", "IsObject", "IsSet", "SplitPath", "Gui", "Error", "ComCall",
-            "ComValue", "ComObjArray", "ComObjValue", "IniRead", "FormatTime", "VarSetStrCapacity",
-            "IsInteger", "IsNumber", "IsFloat", "IsString", "IsAlNum", "IsAlpha", "IsDigit", "IsSpace",
-            "IsTime", "IsUpper", "IsLower", "IsXDigit", "DateAdd", "DateDiff", "ComObjQuery", "ComObjActive",
-            "ComObject", "ComObjConnect", "ComObjCreate", "ComObjFlags", "ComObjGet", "ComObjType",
-            "FileOpen", "FileExist", "DirExist", "IndexError", "MemberError", "PropertyError", "TypeError",
-            "ValueError", "ZeroDivisionError", "OSError", "RegExError", "RegExMatchInfo", "Any", "ClipboardAll",
-            "OutputDebug", "TraySetIcon", "GetKeyName", "GetKeyVK", "GetKeySC", "GetKeyState", "Sort", "SendInput",
-            "SendPlay", "SendEvent", "WinKill", "WinMinimize", "WinMaximize", "WinRestore", "WinGetStyle", "WinGetExStyle",
-            "Click", "XAML_DevTools_Instance", "Persistent"
         };
 
-        private struct MinMax
+        // Built-in functions, variables and classes come from the shared table generated from the AutoHotkey docs
+        // (AhkBuiltins); argument counts for MismatchedArgs too.
+        static EvalAnalysisPlugin()
         {
-            public int Min;
-            public int Max;
-            public MinMax(int min, int max)
-            {
-                Min = min;
-                Max = max;
-            }
+            foreach (var name in AhkBuiltins.AllNames()) ReservedNames.Add(name);
         }
-
-        private static readonly Dictionary<string, MinMax> BuiltInFunctionSignatures = new Dictionary<string, MinMax>(StringComparer.OrdinalIgnoreCase)
-        {
-            { "Abs", new MinMax(1, 1) },
-            { "Ceil", new MinMax(1, 1) },
-            { "Cos", new MinMax(1, 1) },
-            { "Exp", new MinMax(1, 1) },
-            { "Floor", new MinMax(1, 1) },
-            { "Log", new MinMax(1, 1) },
-            { "Ln", new MinMax(1, 1) },
-            { "Max", new MinMax(1, int.MaxValue) },
-            { "Min", new MinMax(1, int.MaxValue) },
-            { "Mod", new MinMax(2, 2) },
-            { "Random", new MinMax(0, 2) },
-            { "Round", new MinMax(1, 2) },
-            { "Sin", new MinMax(1, 1) },
-            { "Sqrt", new MinMax(1, 1) },
-            { "Tan", new MinMax(1, 1) },
-            { "ASin", new MinMax(1, 1) },
-            { "ACos", new MinMax(1, 1) },
-            { "ATan", new MinMax(1, 1) },
-            { "Chr", new MinMax(1, 1) },
-            { "Format", new MinMax(1, int.MaxValue) },
-            { "InStr", new MinMax(2, 5) },
-            { "LoadPicture", new MinMax(1, 3) },
-            { "Ord", new MinMax(1, 1) },
-            { "RegExMatch", new MinMax(2, 5) },
-            { "RegExReplace", new MinMax(2, 6) },
-            { "StrCompare", new MinMax(2, 3) },
-            { "StrGet", new MinMax(1, 3) },
-            { "StrLen", new MinMax(1, 1) },
-            { "StrLower", new MinMax(1, 2) },
-            { "StrPtr", new MinMax(1, 1) },
-            { "StrPut", new MinMax(1, 3) },
-            { "StrReplace", new MinMax(2, 6) },
-            { "StrSplit", new MinMax(1, 4) },
-            { "StrUpper", new MinMax(1, 2) },
-            { "SubStr", new MinMax(1, 3) },
-            { "Trim", new MinMax(1, 2) },
-            { "LTrim", new MinMax(1, 2) },
-            { "RTrim", new MinMax(1, 2) },
-            { "CallbackCreate", new MinMax(1, 3) },
-            { "CallbackFree", new MinMax(1, 1) },
-            { "DllCall", new MinMax(1, int.MaxValue) },
-            { "NumGet", new MinMax(2, 3) },
-            { "NumPut", new MinMax(3, int.MaxValue) },
-            { "ObjBindMethod", new MinMax(2, int.MaxValue) },
-            { "VarSetStrCapacity", new MinMax(1, 2) },
-            { "Hotkey", new MinMax(1, 3) },
-            { "Hotstring", new MinMax(1, 3) },
-            { "HotIf", new MinMax(0, 1) },
-            { "HotIfWinActive", new MinMax(0, 2) },
-            { "HotIfWinExist", new MinMax(0, 2) },
-            { "HotIfWinNotActive", new MinMax(0, 2) },
-            { "HotIfWinNotExist", new MinMax(0, 2) },
-            { "ClipWait", new MinMax(0, 2) },
-            { "KeyWait", new MinMax(1, 2) },
-            { "MouseClick", new MinMax(0, 9) },
-            { "MouseClickDrag", new MinMax(5, 7) },
-            { "MouseGetPos", new MinMax(0, 5) },
-            { "MouseMove", new MinMax(2, 4) },
-            { "Send", new MinMax(1, 1) },
-            { "SendMode", new MinMax(1, 1) },
-            { "SendLevel", new MinMax(1, 1) },
-            { "SendMessage", new MinMax(0, 8) },
-            { "PostMessage", new MinMax(0, 7) },
-            { "OnMessage", new MinMax(2, 3) },
-            { "OnExit", new MinMax(1, 2) },
-            { "OnError", new MinMax(1, 2) },
-            { "SetTimer", new MinMax(0, 3) },
-            { "Sleep", new MinMax(1, 1) },
-            { "Shutdown", new MinMax(1, 1) },
-            { "Exit", new MinMax(0, 1) },
-            { "ExitApp", new MinMax(0, 1) },
-            { "Run", new MinMax(1, 4) },
-            { "RunWait", new MinMax(1, 4) },
-            { "EnvGet", new MinMax(1, 1) },
-            { "EnvSet", new MinMax(1, 2) },
-            { "SysGet", new MinMax(1, 1) },
-            { "SysGetIPAddresses", new MinMax(0, 0) },
-            { "MonitorGet", new MinMax(0, 5) },
-            { "MonitorGetCount", new MinMax(0, 0) },
-            { "MonitorGetName", new MinMax(0, 1) },
-            { "MonitorGetPrimary", new MinMax(0, 0) },
-            { "MonitorGetWorkArea", new MinMax(0, 5) },
-            { "SoundBeep", new MinMax(0, 2) },
-            { "SoundPlay", new MinMax(1, 2) },
-            { "SoundGetVolume", new MinMax(0, 2) },
-            { "SoundSetVolume", new MinMax(1, 3) },
-            { "SoundGetMute", new MinMax(0, 2) },
-            { "SoundSetMute", new MinMax(1, 3) },
-            { "ImageSearch", new MinMax(5, 7) },
-            { "PixelGetColor", new MinMax(2, 3) },
-            { "PixelSearch", new MinMax(5, 7) },
-            { "BlockInput", new MinMax(1, 1) },
-            { "CoordMode", new MinMax(1, 2) },
-            { "DirCopy", new MinMax(2, 3) },
-            { "DirCreate", new MinMax(1, 1) },
-            { "DirDelete", new MinMax(1, 2) },
-            { "DirExist", new MinMax(1, 1) },
-            { "DirMove", new MinMax(2, 3) },
-            { "DirSelect", new MinMax(0, 3) },
-            { "FileAppend", new MinMax(1, 3) },
-            { "FileCopy", new MinMax(2, 3) },
-            { "FileCreateShortcut", new MinMax(2, 8) },
-            { "FileDelete", new MinMax(1, 1) },
-            { "FileExist", new MinMax(0, 1) },
-            { "FileGetAttrib", new MinMax(0, 1) },
-            { "FileGetShortcut", new MinMax(1, 7) },
-            { "FileGetSize", new MinMax(0, 2) },
-            { "FileGetTime", new MinMax(0, 2) },
-            { "FileGetVersion", new MinMax(0, 1) },
-            { "FileInstall", new MinMax(2, 3) },
-            { "FileMove", new MinMax(2, 3) },
-            { "FileOpen", new MinMax(2, 3) },
-            { "FileRead", new MinMax(1, 2) },
-            { "FileRecycle", new MinMax(1, 1) },
-            { "FileRecycleEmpty", new MinMax(0, 1) },
-            { "FileSelect", new MinMax(0, 4) },
-            { "FileSetAttrib", new MinMax(1, 3) },
-            { "FileSetTime", new MinMax(0, 4) },
-            { "RegDelete", new MinMax(0, 3) },
-            { "RegDeleteKey", new MinMax(0, 2) },
-            { "RegWrite", new MinMax(1, 6) },
-            { "RegRead", new MinMax(0, 3) },
-            { "SplitPath", new MinMax(1, 5) },
-            { "FormatTime", new MinMax(0, 2) },
-            { "IsSet", new MinMax(1, 1) },
-            { "IsObject", new MinMax(1, 1) },
-            { "Integer", new MinMax(1, 1) },
-            { "Float", new MinMax(1, 1) },
-            { "String", new MinMax(1, 1) },
-            { "Type", new MinMax(1, 1) },
-            { "ComCall", new MinMax(2, int.MaxValue) },
-            { "ComValue", new MinMax(2, 3) },
-            { "ComObjArray", new MinMax(2, 8) },
-            { "ComObjValue", new MinMax(1, 1) },
-            { "Persistent", new MinMax(0, 1) }
-        };
 
         public EvalAnalysisPlugin()
         {
@@ -654,8 +434,10 @@ namespace AHK2AST.Plugins
                     scope.Declare(name, SymbolKind.Class, node.Line, node.Column);
                     _globalDeclarations.Add(name);
 
-                    // Look for custom constructor __New inside class
-                    var constructor = node.ChildNodes.FirstOrDefault(c => c != null && c.NodeType == "Method" && c.Value.Equals("__New", StringComparison.OrdinalIgnoreCase));
+                    // The instance __New takes the call's arguments; `static __New()` runs once when the class is
+                    // created and says nothing about them (a class may have both).
+                    var constructor = node.ChildNodes.FirstOrDefault(c => c != null && c.NodeType == "Method" && c.Value.Equals("__New", StringComparison.OrdinalIgnoreCase)
+                                                                          && c.Metadata != "static");
                     if (constructor != null)
                     {
                         int minArgs = 0;
@@ -824,12 +606,12 @@ namespace AHK2AST.Plugins
                     }
                     else
                     {
-                        MinMax biSig;
-                        if (BuiltInFunctionSignatures.TryGetValue(funcName, out biSig))
+                        int biMin, biMax;
+                        if (AhkBuiltins.TryGetArgCount(funcName, out biMin, out biMax))
                         {
-                            if (actualCount < biSig.Min || actualCount > biSig.Max)
+                            if (actualCount < biMin || actualCount > biMax)
                             {
-                                string rangeStr = biSig.Max == int.MaxValue ? biSig.Min.ToString() + "+" : string.Format("{0}-{1}", biSig.Min, biSig.Max);
+                                string rangeStr = biMax == int.MaxValue ? biMin.ToString() + "+" : string.Format("{0}-{1}", biMin, biMax);
                                 AddIssue("Warning", string.Format("Built-in function '{0}' expects {1} arguments, but got {2}.", funcName, rangeStr, actualCount), node.Line, node.Column, fileContext, "MismatchedArgs");
                             }
                         }

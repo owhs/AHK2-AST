@@ -1,0 +1,22 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ],
+    "Validate": false
+  },
+  "Meta": {
+    "Name": "Logic flow diagram (HTML, no browser)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Logic Flow Diagram",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.NodeDiagramConfig",
+      "ConfigJson": "{\"IncludeBranches\":true,\"IncludeLibraryDetails\":true,\"CollapseIncludes\":true,\"LaunchBrowser\":false,\"OutputPath\":\"${OutputDir}\\\\flow_diagram.html\"}"
+    }
+  ]
+}

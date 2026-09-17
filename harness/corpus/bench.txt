@@ -1,0 +1,7 @@
+# bench files (harness.ps1 bench): large inlined programs + big single files, the slowest of the core sweep
+C:\Users\o\Downloads\AHK2-ActiveX-Gui\example\Showcase.ahk
+C:\Users\o\Downloads\AHK2-ActiveX-Gui\studio\AxStudio.App.ahk
+C:\projects\ahk\ahk-xaml\examples\axml_examples\vscode.ahk
+C:\projects\ahk\AHKSharp\examples\benchmarks\lib_bench\ImagePut.ahk
+C:\Users\o\Downloads\AHK2_Colorful_GUI-main\AHK2ColorfulGUI.ahk
+C:\Apps\AHK\MOSK\Lib\WebViewToo.ahk

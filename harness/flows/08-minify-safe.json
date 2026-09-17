@@ -1,0 +1,21 @@
+{
+  "Harness": {
+    "Modes": [ "inline" ],
+    "Renames": true,
+    "Compatibility": "all"
+  },
+  "Meta": {
+    "Name": "Minify (Safe level)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Minify",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.MinifyConfig",
+      "ConfigJson": "{\"Level\":0,\"ExcludeProperties\":\"\"}"
+    }
+  ]
+}

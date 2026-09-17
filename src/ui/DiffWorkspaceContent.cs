@@ -176,6 +176,8 @@ public class DiffWorkspaceContent : DockContent
         rightHeader.BringToFront();
 
         Controls.Add(_split);
+        // keep the two sides equal
+        _split.SizeChanged += (s, e) => { if (_split.Width > 100) _split.SplitterDistance = Math.Max(50, (_split.Width - _split.SplitterWidth) / 2); };
         Controls.Add(header);
 
         _split.SendToBack();

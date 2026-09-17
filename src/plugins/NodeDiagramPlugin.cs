@@ -64,10 +64,11 @@ namespace AHK2AST.Plugins
             if (root == null) return "Error: Root AST node is null.";
 
             var builder = new LogicFlowGraphBuilder(Config.IncludeBranches, Config.IncludeLibraryDetails, Config.CollapseIncludes);
-            builder.Build(root);
+            using (Prof.Time("diagram.build")) builder.Build(root);
 
-            string mermaid = GenerateMermaid(builder);
-            string html = GenerateHtml(builder, mermaid);
+            string mermaid, html;
+            using (Prof.Time("diagram.mermaid")) mermaid = GenerateMermaid(builder);
+            using (Prof.Time("diagram.html")) html = GenerateHtml(builder, mermaid);
 
             try
             {
@@ -2849,19 +2850,51 @@ namespace AHK2AST.Plugins
             });
         }
 
+        // Line -> innermost include boundary's file, built once (this is asked for every node of the traversal and
+        // used to scan every boundary each time).
+        private string[] _fileForLine;
+        private readonly HashSet<string> _nodeIds = new HashSet<string>();
+
         private string GetFilePathForLine(int line, string defaultPath)
         {
-            if (_fileBoundaries != null && _fileBoundaries.Count > 0)
+            if (_fileBoundaries == null || _fileBoundaries.Count == 0) return defaultPath;
+            if (_fileForLine == null)
             {
-                foreach (var boundary in _fileBoundaries)
+                int max = 0;
+                foreach (var b in _fileBoundaries) if (b.EndLine > max) max = b.EndLine;
+                _fileForLine = new string[max + 2];
+                // _fileBoundaries is sorted smallest first; paint largest first so the smallest (innermost) wins,
+                // exactly as the old first-match scan did
+                for (int i = _fileBoundaries.Count - 1; i >= 0; i--)
                 {
-                    if (line >= boundary.StartLine && line <= boundary.EndLine)
-                    {
-                        return boundary.FileName;
-                    }
+                    var b = _fileBoundaries[i];
+                    for (int l = Math.Max(0, b.StartLine); l <= b.EndLine && l < _fileForLine.Length; l++) _fileForLine[l] = b.FileName;
                 }
             }
-            return defaultPath;
+            return line >= 0 && line < _fileForLine.Length && _fileForLine[line] != null ? _fileForLine[line] : defaultPath;
+        }
+
+        // member name -> ids of every "Class.member" symbol, in the symbol table's order (built once, after
+        // RegisterStaticDeclarations; a dynamic `obj.m()` used to scan the whole table)
+        private Dictionary<string, List<string>> _byMember;
+
+        private List<string> SymbolsNamedMember(string memberName)
+        {
+            if (_byMember == null)
+            {
+                _byMember = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+                foreach (var kv in _symbolToNodeId)
+                {
+                    int dot = kv.Key.LastIndexOf('.');
+                    if (dot < 0) continue;
+                    string m = kv.Key.Substring(dot + 1);
+                    List<string> ids;
+                    if (!_byMember.TryGetValue(m, out ids)) _byMember[m] = ids = new List<string>();
+                    ids.Add(kv.Value);
+                }
+            }
+            List<string> found;
+            return memberName != null && _byMember.TryGetValue(memberName, out found) ? found : new List<string>();
         }
 
         public LogicFlowGraphBuilder(bool includeBranches, bool includeLibraryDetails, bool collapseIncludes)
@@ -2879,7 +2912,7 @@ namespace AHK2AST.Plugins
 
         public void AddNode(string id, string label, string category, string color, string filePath = "Main Script", string tooltip = null)
         {
-            if (Nodes.Any(n => n.Id == id)) return;
+            if (!_nodeIds.Add(id)) return; // (a set: this ran for every node added and scanned them all)
             Nodes.Add(new FlowNode { Id = id, Label = label, Category = category, Color = color, FilePath = filePath, Tooltip = tooltip });
         }
 
@@ -2969,8 +3002,8 @@ namespace AHK2AST.Plugins
 
         public void Build(AstNode root)
         {
-            BuildFileBoundaries(root);
-            RegisterStaticDeclarations(root);
+            using (Prof.Time("diagram.boundaries")) BuildFileBoundaries(root);
+            using (Prof.Time("diagram.declarations")) RegisterStaticDeclarations(root);
 
             string globalId = "global_code";
             string globalTooltip = "<strong>Global Entry Point</strong><br/><span style='color: #a6adc8;'>File: Main Script</span>";
@@ -2993,22 +3026,21 @@ namespace AHK2AST.Plugins
             };
             Definitions.Add(globalDef);
 
-            TraverseFlow(root, globalId, null);
+            using (Prof.Time("diagram.traverse")) TraverseFlow(root, globalId, null);
 
-            // Populate call dependencies
+            // Populate call dependencies (definitions by id: the first with an id wins, as FirstOrDefault did)
+            var defById = new Dictionary<string, DefinitionInfo>();
+            foreach (var d in Definitions) if (d.Id != null && !defById.ContainsKey(d.Id)) defById[d.Id] = d;
+            var linked = new HashSet<string>();
             foreach (var edge in Edges)
             {
-                var fromDef = Definitions.FirstOrDefault(d => d.Id == edge.From);
-                var toDef = Definitions.FirstOrDefault(d => d.Id == edge.To);
-                if (fromDef != null && toDef != null)
+                DefinitionInfo fromDef, toDef;
+                if (edge.From != null && edge.To != null && defById.TryGetValue(edge.From, out fromDef) && defById.TryGetValue(edge.To, out toDef))
                 {
-                    if (!fromDef.Outgoing.Contains(toDef.Id))
+                    if (linked.Add(fromDef.Id + ">" + toDef.Id))
                     {
-                        fromDef.Outgoing.Add(toDef.Id);
-                    }
-                    if (!toDef.Incoming.Contains(fromDef.Id))
-                    {
-                        toDef.Incoming.Add(fromDef.Id);
+                        if (!fromDef.Outgoing.Contains(toDef.Id)) fromDef.Outgoing.Add(toDef.Id);
+                        if (!toDef.Incoming.Contains(fromDef.Id)) toDef.Incoming.Add(fromDef.Id);
                     }
                 }
             }
@@ -3019,23 +3051,31 @@ namespace AHK2AST.Plugins
                 string codeStr = "";
                 try
                 {
-                    codeStr = AstEmitter.Emit(def.Node);
+                    using (Prof.Time("diagram.code")) codeStr = AstEmitter.Emit(def.Node);
                 }
                 catch (Exception ex)
                 {
                     codeStr = "; Error emitting code snippet: " + ex.Message;
                 }
                 def.Code = codeStr;
-                def.LogicTypes = AnalyzeLogicTypes(def.Node, def.Category);
+                using (Prof.Time("diagram.logictypes")) def.LogicTypes = AnalyzeLogicTypes(def.Node, def.Category);
             }
 
             // Add parent include file nodes and defines edges
             var uniqueFilePaths = new List<string>();
+            var seenPaths = new HashSet<string>();
+            var topLevelByFile = new Dictionary<string, List<FlowNode>>();
             foreach (var n in Nodes)
             {
-                if (!string.IsNullOrEmpty(n.FilePath) && !uniqueFilePaths.Contains(n.FilePath))
+                if (!string.IsNullOrEmpty(n.FilePath) && seenPaths.Add(n.FilePath))
                 {
                     uniqueFilePaths.Add(n.FilePath);
+                }
+                if (n.FilePath != null && (n.Category == "Function" || n.Category == "Class" || n.Category == "Hotkey"))
+                {
+                    List<FlowNode> list;
+                    if (!topLevelByFile.TryGetValue(n.FilePath, out list)) topLevelByFile[n.FilePath] = list = new List<FlowNode>();
+                    list.Add(n);
                 }
             }
 
@@ -3044,7 +3084,7 @@ namespace AHK2AST.Plugins
                 if (filePath != "Main Script" && !filePath.StartsWith("file_"))
                 {
                     string fileNodeId = "file_" + filePath;
-                    if (!Nodes.Any(n => n.Id == fileNodeId))
+                    if (_nodeIds.Add(fileNodeId))
                     {
                         string tooltip = string.Format("<strong>Include File: {0}</strong><br/><span style='color: #a6adc8;'>Double-click to expand/collapse this include file's contents.</span>", SimpleHtmlEncode(filePath));
                         Nodes.Add(new FlowNode
@@ -3059,7 +3099,8 @@ namespace AHK2AST.Plugins
                     }
 
                     // Connect this include file node to its top-level contents via "defines" edges
-                    var children = Nodes.Where(n => n.FilePath == filePath && n.Id != fileNodeId && (n.Category == "Function" || n.Category == "Class" || n.Category == "Hotkey")).ToList();
+                    List<FlowNode> inFile;
+                    var children = topLevelByFile.TryGetValue(filePath, out inFile) ? inFile.Where(n => n.Id != fileNodeId).ToList() : new List<FlowNode>();
                     foreach (var child in children)
                     {
                         AddEdge(fileNodeId, child.Id, "defines");
@@ -3451,7 +3492,7 @@ namespace AHK2AST.Plugins
                             }
                             else
                             {
-                                var matchingMethods = _symbolToNodeId.Where(kv => kv.Key.EndsWith("." + memberName)).Select(kv => kv.Value).ToList();
+                                var matchingMethods = SymbolsNamedMember(memberName);
                                 foreach (var methodId in matchingMethods)
                                 {
                                     AddEdge(currentCallerId, methodId, "calls (dynamic)");
@@ -3460,7 +3501,7 @@ namespace AHK2AST.Plugins
                         }
                         else
                         {
-                            var matchingMethods = _symbolToNodeId.Where(kv => kv.Key.EndsWith("." + memberName)).Select(kv => kv.Value).ToList();
+                            var matchingMethods = SymbolsNamedMember(memberName);
                             foreach (var methodId in matchingMethods)
                             {
                                 AddEdge(currentCallerId, methodId, "calls (dynamic)");

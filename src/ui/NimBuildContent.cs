@@ -411,8 +411,9 @@ Write-Host 'Process finished!'
             
             string gccPath;
             IsGccInstalled(out gccPath);
-            string gccDir = Path.GetDirectoryName(gccPath);
-            string windresPath = Path.Combine(gccDir, "windres.exe");
+            // no gcc: no windres either (resources are skipped rather than crashing on a null path)
+            string gccDir = string.IsNullOrEmpty(gccPath) ? null : Path.GetDirectoryName(gccPath);
+            string windresPath = gccDir == null ? "" : Path.Combine(gccDir, "windres.exe");
             if (File.Exists(windresPath))
             {
                 AppendConsole("Compiling Resource Script to COFF object...\n", WbTheme.Text);

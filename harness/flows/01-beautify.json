@@ -1,0 +1,22 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ],
+    "Idempotent": true
+  },
+  "Meta": {
+    "Name": "Beautify (defaults)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Beautify",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.BeautifyConfig",
+      "ConfigJson": "{\"UseTabs\":false,\"IndentSize\":4,\"EmitBlankLines\":true,\"FunctionSpacing\":1,\"EmitComments\":true}"
+    }
+  ]
+}

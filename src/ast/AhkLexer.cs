@@ -37,25 +37,87 @@ public class AhkLexer
         {"not", TokenType.LogicalNot}, {"is", TokenType.Is}
     };
 
+    private readonly string _orig;   // source before continuation sections were joined
+    private readonly SourceMap _map; // joined-text offset -> original offset (null when nothing was joined)
+
+    /// <summary>
+    /// Original source text of the joined-text range [start, end) when that range spans a joined continuation
+    /// section (so its original text differs) and both ends were copied verbatim; otherwise null.
+    /// </summary>
+    private string OriginalSpan(int start, int end)
+    {
+        if (_map == null || end <= start) return null;
+        int o1 = _map.Map(start), o2 = _map.Map(end - 1);
+        if (o1 < 0 || o2 < o1) return null;
+        int len = o2 + 1 - o1;
+        if (len == end - start) return null; // nothing joined inside
+        return _orig.Substring(o1, len);
+    }
+
     public AhkLexer(string source)
     {
-        _src = source ?? "";
+        _orig = source ?? "";
+        _src = ContinuationJoiner.Join(_orig, out _map); // continuation sections are merged as text first
         _pos = 0;
         _line = 1;
         _col = 1;
         _tokens = new List<Token>();
     }
 
+    /// <summary>The source as given (offsets on tokens and nodes refer to it).</summary>
+    public string OriginalSource { get { return _orig; } }
+
+    private SourceLineMap _lineMap;
+    /// <summary>Line/column lookup for <see cref="OriginalSource"/>.</summary>
+    public SourceLineMap LineMap
+    {
+        get
+        {
+            if (_lineMap == null)
+            {
+                _lineMap = new SourceLineMap(_orig);
+                if (_map != null) _lineMap.Sections = _map.Sections;
+            }
+            return _lineMap;
+        }
+    }
+
+    /// <summary>Original-source offset of a joined-text position (a token's start, or its end when <paramref name="asEnd"/>).</summary>
+    private int OrigOffset(int joinedPos, bool asEnd)
+    {
+        if (_map == null) return Math.Min(joinedPos, _orig.Length);
+        return _map.MapAny(joinedPos, asEnd, _orig.Length);
+    }
+
+    /// <summary>Gives the tokens added since <paramref name="from"/> the original range of joined text [start, end).</summary>
+    private void StampOffsets(int from, int start, int end)
+    {
+        if (from >= _tokens.Count) return;
+        int s = OrigOffset(start, false), e = OrigOffset(end, true);
+        while (e > s && (_orig[e - 1] == ' ' || _orig[e - 1] == '\t' || _orig[e - 1] == '\r')) e--; // `#Directive x ⏎` reads to the line end
+        if (e < s) e = s;
+        for (int i = from; i < _tokens.Count; i++)
+        {
+            _tokens[i].StartOffset = s;
+            _tokens[i].EndOffset = e;
+        }
+    }
+
     public List<Token> Tokenize()
     {
+        int stampFrom = 0, stampStart = 0;
         while (_pos < _src.Length)
         {
+            // every token added in the previous round spans the text read in that round
+            StampOffsets(stampFrom, stampStart, _pos);
+            stampFrom = _tokens.Count;
+            stampStart = _pos;
             _tokenStartLine = _line;
             _tokenStartCol = _col;
             char c = Peek();
 
             // Skip whitespace (not newlines)
-            if (c == ' ' || c == '\t' || c == '\r')
+            if (c == ' ' || c == '\t' || c == '\r' || c == ContinuationJoiner.Nl) // a joined section's line feed is whitespace in code
             { Advance(); continue; }
 
             // Newlines
@@ -122,11 +184,16 @@ public class AhkLexer
             {
                 int startPos = _pos;
                 _readContinuationSection = false;
-                string str = ReadDoubleQuotedString();
+                string str = ReadDoubleQuotedString().Replace(ContinuationJoiner.Nl, '\n'); // joined section: real line feed
                 var tok = new Token(TokenType.String, "\"" + str + "\"", _tokenStartLine, _tokenStartCol);
                 if (_readContinuationSection)
                 {
                     tok.Metadata = "raw:" + _src.Substring(startPos, _pos - startPos);
+                }
+                else
+                {
+                    string raw = OriginalSpan(startPos, _pos); // spans a joined section: keep the original layout
+                    if (raw != null) tok.Metadata = "raw:" + raw;
                 }
                 _tokens.Add(tok);
                 continue;
@@ -135,11 +202,16 @@ public class AhkLexer
             {
                 int startPos = _pos;
                 _readContinuationSection = false;
-                string str = ReadSingleQuotedString();
+                string str = ReadSingleQuotedString().Replace(ContinuationJoiner.Nl, '\n');
                 var tok = new Token(TokenType.String, "'" + str + "'", _tokenStartLine, _tokenStartCol);
                 if (_readContinuationSection)
                 {
                     tok.Metadata = "raw:" + _src.Substring(startPos, _pos - startPos);
+                }
+                else
+                {
+                    string raw = OriginalSpan(startPos, _pos);
+                    if (raw != null) tok.Metadata = "raw:" + raw;
                 }
                 _tokens.Add(tok);
                 continue;
@@ -169,7 +241,7 @@ public class AhkLexer
             }
 
             // Identifiers and keywords
-            if (char.IsLetter(c) || c == '_')
+            if (IsNameStart(c))
             {
                 string ident = ReadIdentifier();
 
@@ -183,6 +255,13 @@ public class AhkLexer
 
                 // Hotstring detection: :options:trigger::replacement
                 // (handled separately)
+
+                // Dynamic variable name: `b%A_Index%`, `pre%n%post` is ONE variable reference, not a concatenation.
+                if (Peek() == '%' && DerefCloses(_pos))
+                {
+                    Emit(TokenType.Identifier, ReadDynamicNameTail(ident));
+                    continue;
+                }
 
                 TokenType kwType;
                 if (Keywords.TryGetValue(ident, out kwType))
@@ -202,17 +281,10 @@ public class AhkLexer
 
 
 
-            // Variable dereferencing: %expr%
+            // Variable dereferencing: %expr%, possibly part of a longer dynamic name (`%n%x`, `%a%_%b%`)
             if (c == '%')
             {
-                int start = _pos;
-                Advance(); // skip opening %
-                while (_pos < _src.Length && _src[_pos] != '%' && _src[_pos] != '\n')
-                    Advance();
-                string inner = _src.Substring(start + 1, _pos - start - 1);
-                if (_pos < _src.Length && _src[_pos] == '%')
-                    Advance(); // skip closing %
-                Emit(TokenType.Identifier, "%" + inner + "%");
+                Emit(TokenType.Identifier, ReadDynamicNameTail(""));
                 continue;
             }
 
@@ -226,7 +298,8 @@ public class AhkLexer
             Advance();
         }
 
-        _tokens.Add(new Token(TokenType.EOF, "", _line, _col));
+        StampOffsets(stampFrom, stampStart, _pos);
+        _tokens.Add(new Token(TokenType.EOF, "", _line, _col) { StartOffset = _orig.Length, EndOffset = _orig.Length });
         _tokens = ProcessContinuations(_tokens);
         return _tokens;
     }
@@ -247,6 +320,48 @@ public class AhkLexer
     private void Emit(TokenType type, string value)
     {
         _tokens.Add(new Token(type, value, _tokenStartLine, _tokenStartCol));
+    }
+
+    /// <summary>True if the `%` at <paramref name="p"/> has a closing `%` on the same line.</summary>
+    private bool DerefCloses(int p)
+    {
+        for (int i = p + 1; i < _src.Length; i++)
+        {
+            char ch = _src[i];
+            if (ch == '%') return true;
+            if (ch == '\n' || ch == ContinuationJoiner.Nl) return false;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Reads the rest of a dynamic name starting at `%` or at identifier characters: any run of identifier characters
+    /// and `%expr%` parts with no whitespace between them (`b%A_Index%`, `%n%x`, `a%x%b%y%`). An unclosed `%`
+    /// keeps its old behaviour (read to the end of the line).
+    /// </summary>
+    private string ReadDynamicNameTail(string head)
+    {
+        var sb = new StringBuilder(head);
+        while (_pos < _src.Length)
+        {
+            char ch = Peek();
+            if (ch == '%')
+            {
+                if (sb.Length > 0 && !DerefCloses(_pos)) break;
+                Advance(); // opening %
+                sb.Append('%');
+                while (_pos < _src.Length && _src[_pos] != '%' && _src[_pos] != '\n' && _src[_pos] != ContinuationJoiner.Nl)
+                    sb.Append(Advance());
+                if (_pos < _src.Length && _src[_pos] == '%') sb.Append(Advance());
+            }
+            else if (IsNameChar(ch))
+            {
+                if (sb.Length == 0 || sb[sb.Length - 1] != '%') break; // identifier chars only continue after a deref
+                while (_pos < _src.Length && IsNameChar(Peek())) sb.Append(Advance());
+            }
+            else break;
+        }
+        return sb.ToString();
     }
 
     private bool LastTokenIs(TokenType type)
@@ -275,10 +390,13 @@ public class AhkLexer
         // Skip first ':'
         p++;
 
-        // We need to find the second ':' to close the options.
-        // It must be on the same line, before any whitespace or newline.
-        while (p < _src.Length && _src[p] != '\n' && _src[p] != '\r' && _src[p] != ' ' && _src[p] != '\t' && _src[p] != ':')
+        // The options run to the second ':'. They are letters, digits, `*` `?` `-` and blanks (`: :btw::` has a
+        // blank option list); anything else (a quote, a paren...) means this is no hotstring — e.g. a ternary
+        // continuation line `: "a::b"`.
+        while (p < _src.Length && _src[p] != ':')
         {
+            char oc = _src[p];
+            if (!(char.IsLetterOrDigit(oc) || oc == '*' || oc == '?' || oc == '-' || oc == ' ' || oc == '\t')) return false;
             p++;
         }
 
@@ -318,7 +436,7 @@ public class AhkLexer
     private string ReadLineComment()
     {
         int start = _pos;
-        while (_pos < _src.Length && _src[_pos] != '\n')
+        while (_pos < _src.Length && _src[_pos] != '\n' && _src[_pos] != ContinuationJoiner.Nl)
             Advance();
         return _src.Substring(start, _pos - start);
     }
@@ -336,7 +454,8 @@ public class AhkLexer
             }
             Advance();
         }
-        // Unterminated block comment - resilient, don't crash
+        // Unterminated: AHK lets a block comment run to the end of the file (the last character included).
+        while (_pos < _src.Length) Advance();
         return _src.Substring(start);
     }
 
@@ -727,10 +846,25 @@ public class AhkLexer
         return _src.Substring(start, _pos - start);
     }
 
+    /// <summary>
+    /// AHK v2 names are letters, digits, underscore and any non-ASCII character (`★a★b★c:` is a valid label).
+    /// The joiner's private-use line marker and non-ASCII blanks are not name characters.
+    /// </summary>
+    private static bool IsNameChar(char c)
+    {
+        if (c < 128) return char.IsLetterOrDigit(c) || c == '_';
+        return c != ContinuationJoiner.Nl && !char.IsWhiteSpace(c);
+    }
+
+    private static bool IsNameStart(char c)
+    {
+        return IsNameChar(c) && !(c >= '0' && c <= '9');
+    }
+
     private string ReadIdentifier()
     {
         int start = _pos;
-        while (_pos < _src.Length && (char.IsLetterOrDigit(_src[_pos]) || _src[_pos] == '_'))
+        while (_pos < _src.Length && IsNameChar(_src[_pos]))
             Advance();
         return _src.Substring(start, _pos - start);
     }
@@ -824,7 +958,13 @@ public class AhkLexer
 
         if (p >= _src.Length) return -1;
 
-        if (_src[p] == ':') return -1;
+        // `:::` is a hotkey on the colon key; any other line starting with ':' is left to the hotstring rules
+        if (_src[p] == ':')
+        {
+            bool colonKey = p + 2 < _src.Length && _src[p + 1] == ':' && _src[p + 2] == ':'
+                && (p + 3 >= _src.Length || _src[p + 3] == ' ' || _src[p + 3] == '\t' || _src[p + 3] == '\r' || _src[p + 3] == '\n' || _src[p + 3] == '{' || _src[p + 3] == ';');
+            return colonKey ? p + 1 : -1;
+        }
 
         bool inDoubleQuote = false;
         bool inSingleQuote = false;
@@ -833,7 +973,7 @@ public class AhkLexer
         {
             char c = _src[p];
 
-            if (c == '\n')
+            if (c == '\n' || c == ContinuationJoiner.Nl)
                 break;
 
             if (inDoubleQuote)
@@ -860,6 +1000,12 @@ public class AhkLexer
             }
             else
             {
+                // `` `; `` escapes the semicolon (a hotkey on the ; key: `` `;:: ``), so it starts no comment
+                if (c == '`' && p + 1 < _src.Length && _src[p + 1] != '\n')
+                {
+                    p += 2;
+                    continue;
+                }
                 if (c == ';')
                 {
                     break;
@@ -878,6 +1024,11 @@ public class AhkLexer
                 }
                 else if (c == ':' && p + 1 < _src.Length && _src[p + 1] == ':')
                 {
+                    // `+:::` is Shift+colon: when only modifier symbols precede, the key itself is the first ':'
+                    // (`a:::` stays a remap of `a` to the colon key)
+                    if (p + 2 < _src.Length && _src[p + 2] == ':'
+                        && _src.Substring(_pos, p - _pos).Trim().All(ch => "~*$!^+#<>".IndexOf(ch) >= 0))
+                        return p + 1;
                     return p;
                 }
             }
@@ -893,11 +1044,14 @@ public class AhkLexer
         char c2 = PeekAt(1);
         char c3 = PeekAt(2);
 
+        // Four-char operator (must be tested before >>>)
+        if (c == '>' && c2 == '>' && c3 == '>' && PeekAt(3) == '=') { Advance(); Advance(); Advance(); Advance(); return new Token(TokenType.UnsignedShiftRightAssign, ">>>=", line, col); }
+
         // Three-char operators
         if (c == '>' && c2 == '>' && c3 == '>') { Advance(); Advance(); Advance(); return new Token(TokenType.UnsignedShiftRight, ">>>", line, col); }
-        if (c == '>' && c2 == '>' && c3 == '=') { Advance(); Advance(); Advance(); return new Token(TokenType.Assign, ">>=", line, col); }
+        if (c == '>' && c2 == '>' && c3 == '=') { Advance(); Advance(); Advance(); return new Token(TokenType.ShiftRightAssign, ">>=", line, col); }
         if (c == '/' && c2 == '/' && c3 == '=') { Advance(); Advance(); Advance(); return new Token(TokenType.IntDivAssign, "//=", line, col); }
-        if (c == '<' && c2 == '<' && c3 == '=') { Advance(); Advance(); Advance(); return new Token(TokenType.Assign, "<<=", line, col); }
+        if (c == '<' && c2 == '<' && c3 == '=') { Advance(); Advance(); Advance(); return new Token(TokenType.ShiftLeftAssign, "<<=", line, col); }
         if (c == '!' && c2 == '=' && c3 == '=') { Advance(); Advance(); Advance(); return new Token(TokenType.StrictNotEqual, "!==", line, col); }
         if (c == '=' && c2 == '=' && c3 == '=') { Advance(); Advance(); Advance(); return new Token(TokenType.StrictEqual, "===", line, col); }
         if (c == '?' && c2 == '?' && c3 == '=') { Advance(); Advance(); Advance(); return new Token(TokenType.NullCoalesceAssign, "??=", line, col); }
@@ -975,6 +1129,9 @@ public class AhkLexer
         var result = new List<Token>(tokens.Count);
         int parenDepth = 0;
         int bracketDepth = 0;
+        // Comments at the end of a line that continues on the next one (`users  ; note` ⏎ `.filter(...)`) would sit
+        // between an operand and its `.member`; they move to the end of the joined logical line instead.
+        var deferredComments = new List<Token>();
 
         for (int i = 0; i < tokens.Count; i++)
         {
@@ -1010,12 +1167,30 @@ public class AhkLexer
                 }
 
                 // Next line starts with continuation operator - remove newline
-                if (IsContinuationStartOp(nextType))
-                    continue;
-
                 // Current line ends with continuation operator - remove newline
-                if (IsContinuationEndOp(prevType))
+                if (IsContinuationStartOp(nextType) || IsContinuationEndOp(prevType))
+                {
+                    // only a comment between an operand and the next line's leading operator is in the way; after a
+                    // line-ending `{` / `(` / operator it stays where it is
+                    if (IsContinuationEndOp(prevType)) continue;
+                    int k = result.Count;
+                    while (k > 0 && result[k - 1].Type == TokenType.Comment) k--;
+                    if (k < result.Count)
+                    {
+                        deferredComments.AddRange(result.GetRange(k, result.Count - k));
+                        result.RemoveRange(k, result.Count - k);
+                    }
                     continue;
+                }
+
+                // a line break that ends the logical line: the deferred comments go before it
+                result.AddRange(deferredComments);
+                deferredComments.Clear();
+            }
+            else if (tt == TokenType.EOF && deferredComments.Count > 0)
+            {
+                result.AddRange(deferredComments);
+                deferredComments.Clear();
             }
 
             result.Add(tokens[i]);
@@ -1026,6 +1201,7 @@ public class AhkLexer
 
     private static bool IsContinuationStartOp(TokenType type)
     {
+        if (TokenKinds.IsAssignment(type)) return true;
         switch (type)
         {
             case TokenType.Dot:
@@ -1075,6 +1251,7 @@ public class AhkLexer
 
     private static bool IsContinuationEndOp(TokenType type)
     {
+        if (TokenKinds.IsAssignment(type)) return true;
         switch (type)
         {
             case TokenType.Dot:

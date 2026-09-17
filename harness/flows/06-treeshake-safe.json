@@ -1,0 +1,21 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ]
+  },
+  "Meta": {
+    "Name": "Tree-shake (Safe profile)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Tree-shake",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.TreeShakerConfig",
+      "ConfigJson": "{\"Profile\":1}"
+    }
+  ]
+}

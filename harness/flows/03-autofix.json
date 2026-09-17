@@ -1,0 +1,21 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ]
+  },
+  "Meta": {
+    "Name": "Auto-fix (defaults)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Auto-Fixes",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.AutoFixConfig",
+      "ConfigJson": "{}"
+    }
+  ]
+}
