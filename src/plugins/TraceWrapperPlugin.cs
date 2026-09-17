@@ -144,14 +144,11 @@ namespace AHK2AST.Plugins
                 else if (node.NodeType == "For" && node.ChildCount > 2) bodyIndex = 2;
                 else if (node.NodeType == "Loop" && node.ChildCount > 0)
                 {
-                    var last = node.GetChild(node.ChildCount - 1);
-                    if (last.NodeType == "Until")
+                    // the body is the last child that isn't the loop's `until` / `else`
+                    for (int k = node.ChildCount - 1; k >= 0; k--)
                     {
-                        if (node.ChildCount > 1) bodyIndex = node.ChildCount - 2;
-                    }
-                    else
-                    {
-                        bodyIndex = node.ChildCount - 1;
+                        var c = node.GetChild(k);
+                        if (c != null && c.NodeType != "Until" && c.NodeType != "Else") { bodyIndex = k; break; }
                     }
                 }
 
@@ -198,7 +195,9 @@ namespace AHK2AST.Plugins
                     }
                     else if (Config.TraceLines || Config.WrapMode == "Lines" || Config.WrapMode == "Both")
                     {
-                        if (IsLineInstrumentable(child))
+                        // (nothing may come between a label and the loop it names: `continue Outer` needs `Outer:` + loop)
+                        bool afterLabel = i > 0 && node.GetChild(i - 1) != null && node.GetChild(i - 1).NodeType == "Label";
+                        if (!afterLabel && IsLineInstrumentable(child))
                         {
                             var lineNum = child.Line;
                             // Prepend line trace call: __TraceHelper.Line(N, "Code", "File")
@@ -208,6 +207,10 @@ namespace AHK2AST.Plugins
                             else
                                 codeText = child.ToString();
 
+                            // Only the statement's first line, capped: a whole block per traced line grows the output
+                            // quadratically (AutoHotkey itself crashed loading such files).
+                            codeText = (codeText ?? "").Replace("\r", "").Split('\n')[0].Trim();
+                            if (codeText.Length > 160) codeText = codeText.Substring(0, 157) + "...";
                             string escapedCodeText = AhkStringHelper.EscapeAhkString(codeText);
                             string fileArg = GetNodeFilePath(child);
                             var lineCallCode = string.Format("__TraceHelper.Line({0}, {1}, \"{2}\")", lineNum, escapedCodeText, fileArg);
@@ -238,10 +241,34 @@ namespace AHK2AST.Plugins
             string t = node.NodeType;
 
             if (t == "Comment" || t == "Warning" || t == "Error" || t == "Directive" || t == "Label" || t == "Include" || t == "Block") return false;
+            if (IsScopeDeclaration(node)) return false; // must stay the function's first line
+            // `until` / a loop's `else` must directly follow their loop (a line in between crashes AutoHotkey 2.0.19)
+            if (t == "Until" || t == "Else") return false;
             if (t == "Method" || t == "Class") return false;
             if (t == "Return" || t == "Break" || t == "Continue" || t == "Throw") return true;
 
             return true;
+        }
+
+        /// <summary>A bare `global` / `local` / `static` (assume-global / force-local / assume-static): AHK only accepts it as the function's first line.</summary>
+        private static bool IsScopeDeclaration(AstNode node)
+        {
+            return node != null && node.NodeType == "Declaration" && string.IsNullOrEmpty(node.Value)
+                && (node.Metadata == "global" || node.Metadata == "local" || node.Metadata == "static");
+        }
+
+        /// <summary>Takes the leading scope declaration (and comments before it) off a body, to be put back first.</summary>
+        private static List<AstNode> TakeLeadingScopeDeclaration(AstNode body)
+        {
+            var taken = new List<AstNode>();
+            int k = 0;
+            while (k < body.ChildCount && body.GetChild(k) != null && body.GetChild(k).NodeType == "Comment") k++;
+            if (k < body.ChildCount && IsScopeDeclaration(body.GetChild(k)))
+            {
+                for (int j = 0; j <= k; j++) taken.Add(body.GetChild(j));
+                for (int j = k; j >= 0; j--) body.RemoveChild(j);
+            }
+            return taken;
         }
 
         private bool ShouldWrapMethod(string methodName)
@@ -345,6 +372,16 @@ namespace AHK2AST.Plugins
 
             if (traceInitNode == null) return;
 
+            var scopeDecl = TakeLeadingScopeDeclaration(bodyNode);
+            try { InsertTrace(bodyNode, traceInitNode, methodName); }
+            finally
+            {
+                for (int k = scopeDecl.Count - 1; k >= 0; k--) bodyNode.InsertChild(0, scopeDecl[k]);
+            }
+        }
+
+        private void InsertTrace(AstNode bodyNode, AstNode traceInitNode, string methodName)
+        {
             if (Config.WrapTryCatch)
             {
                 var tryNode = new AstNode("Try", bodyNode.Line, bodyNode.Column);
@@ -385,6 +422,12 @@ namespace AHK2AST.Plugins
             if (!Config.TraceHotkeys) return;
             if (hotkeyNode.ChildCount == 0) return;
             var bodyNode = hotkeyNode.GetChild(0);
+            // Stacked (`~*Shift::` above `~*Ctrl::f()`): the action belongs to the last one, which gets the trace.
+            if (bodyNode != null && bodyNode.NodeType == "Hotkey") { InstrumentHotkey(bodyNode); return; }
+            if (bodyNode != null && bodyNode.NodeType == "Hotstring") { InstrumentHotstring(bodyNode); return; }
+            // `~ScrollLock::` + `Toggle(*) { ... }` defines a global function: trace it as a function, never wrap it
+            // in a block (that would make it local to the hotkey).
+            if (bodyNode != null && bodyNode.NodeType == "Method") { InstrumentMethod(bodyNode); return; }
 
             if (bodyNode.NodeType != "Block")
             {
@@ -410,6 +453,10 @@ namespace AHK2AST.Plugins
             if (!Config.TraceHotstrings) return;
             if (hotstringNode.ChildCount == 0) return;
             var bodyNode = hotstringNode.GetChild(0);
+            // Stacked hotstrings / hotkeys: the action belongs to the last one, which gets the trace.
+            if (bodyNode != null && bodyNode.NodeType == "Hotkey") { InstrumentHotkey(bodyNode); return; }
+            if (bodyNode != null && bodyNode.NodeType == "Hotstring") { InstrumentHotstring(bodyNode); return; }
+            if (bodyNode != null && bodyNode.NodeType == "Method") { InstrumentMethod(bodyNode); return; } // global function
 
             if (bodyNode.NodeType != "Block")
             {
@@ -862,9 +909,15 @@ __TraceHelper_Str(val) {{
                 var tokens = lexer.Tokenize();
                 var parser = new AhkParser(tokens, new GrammarRules());
                 var progNode = parser.ParseProgram();
+                // The helpers (class + functions) go after the leading directives, not at the end: after a final
+                // `return` of the auto-execute section AHK flags them as code that never executes.
+                int at = 0;
+                while (at < root.ChildCount && root.GetChild(at) != null
+                       && (root.GetChild(at).NodeType == "Directive" || root.GetChild(at).NodeType == "Comment"))
+                    at++;
                 foreach (var child in progNode.ChildNodes)
                 {
-                    root.AddChild(child);
+                    root.InsertChild(at++, child);
                 }
             }
             catch {}

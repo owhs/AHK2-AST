@@ -185,7 +185,7 @@ public class PipelineBuilderContent : DockContent
         // Setup inner dock theme to match main window
         ThemeBase innerTheme = WbTheme.Current.IsDark ? (ThemeBase)new VS2015DarkTheme() : new VS2015LightTheme();
         _innerDock.Theme = innerTheme;
-        AstWorkbenchForm.CustomizeDockPalette(innerTheme);
+        UiTheming.CustomizeDockPalette(innerTheme);
 
         // Left Pane: Palette Tree (Toolbox)
         PaletteTree = new TreeView
@@ -246,7 +246,7 @@ public class PipelineBuilderContent : DockContent
         VisualInspector.ExternalItemDropped += VisualInspector_ExternalItemDropped;
         VisualInspector.ControlAdded += (s, e) => { MarkDirty(); UpdateStepIndices(); };
         VisualInspector.ControlRemoved += (s, e) => { MarkDirty(); UpdateStepIndices(); };
-        VisualInspector.FlowOrderChanged += (s, e) => UpdateStepIndices();
+        VisualInspector.FlowOrderChanged += (s, e) => { UpdateStepIndices(); MarkDirty(); };
         VisualInspector.Click += (s, e) =>
         {
             // Click empty space -> show pipeline properties, unselect cards
@@ -337,6 +337,73 @@ public class PipelineBuilderContent : DockContent
         catch { }
     }
 
+    private void AdjustInnerPanels()
+    {
+        if (!_initialLayoutDone) return;
+        if (this.IsDisposed || this.Disposing) return;
+        if (_innerDock == null || _innerDock.IsDisposed || _innerDock.Disposing) return;
+
+        int w = this.Width;
+        if (w <= 0) return;
+
+        // Ensure all contents are shown in their correct DockState
+        if (_paletteContent != null && _paletteContent.IsHidden)
+        {
+            _paletteContent.Show(_innerDock, DockState.DockLeft);
+        }
+        if (_inspectorContent != null && _inspectorContent.IsHidden)
+        {
+            _inspectorContent.Show(_innerDock, DockState.Document);
+        }
+        if (_propsContent != null && _propsContent.DockState != DockState.DockRight)
+        {
+            _propsContent.Show(_innerDock, DockState.DockRight);
+        }
+
+        // Load preferred sizes from state
+        var state = AHK2AST.UI.WorkbenchState.Load();
+        int leftPortion = state.MainSplitterDistance;
+        int rightPortion = state.RightSplitterDistance;
+
+        if (leftPortion < 100 || leftPortion > 1200) leftPortion = 280;
+        if (rightPortion < 100 || rightPortion > 1200) rightPortion = 350;
+
+        int minDocWidth = 150;
+        int minLeftWidth = 100;
+        int minRightWidth = 120;
+
+        if (leftPortion + rightPortion + minDocWidth > w)
+        {
+            // Calculate remaining width for left and right after reserving minDocWidth for center
+            int remaining = w - minDocWidth;
+            if (remaining < minLeftWidth + minRightWidth)
+            {
+                // Extremely narrow: scale to absolute minimums proportional to their defaults
+                _innerDock.DockLeftPortion = Math.Max(50, w * 3 / 10); // 30% of width
+                _innerDock.DockRightPortion = Math.Max(50, w * 4 / 10); // 40% of width
+            }
+            else
+            {
+                // Scale left and right portions proportionally to fit
+                double ratio = (double)remaining / (leftPortion + rightPortion);
+                _innerDock.DockLeftPortion = Math.Max(minLeftWidth, (int)(leftPortion * ratio));
+                _innerDock.DockRightPortion = Math.Max(minRightWidth, (int)(rightPortion * ratio));
+            }
+        }
+        else
+        {
+            // Plenty of space: use preferred sizes
+            _innerDock.DockLeftPortion = leftPortion;
+            _innerDock.DockRightPortion = rightPortion;
+        }
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        AdjustInnerPanels();
+    }
+
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
@@ -365,6 +432,7 @@ public class PipelineBuilderContent : DockContent
                 _propsContent.Show(_innerDock, DockState.DockRight);
 
                 _initialLayoutDone = true;
+                AdjustInnerPanels();
             }
         }));
     }
@@ -395,7 +463,7 @@ public class PipelineBuilderContent : DockContent
             try
             {
                 ThemeBase innerTheme = WbTheme.Current.IsDark ? (ThemeBase)new VS2015DarkTheme() : new VS2015LightTheme();
-                AstWorkbenchForm.CustomizeDockPalette(innerTheme);
+                UiTheming.CustomizeDockPalette(innerTheme);
 
                 // DockPanelSuite optimization bypass: if the new theme has the same class type as the old theme,
                 // it ignores the setter. So we temporarily assign the opposite theme class to force a full redraw.
@@ -647,6 +715,22 @@ public class PipelineBuilderContent : DockContent
         IsDirty = true;
     }
 
+    /// <summary>Raised after the flow was written to disk (path).</summary>
+    public event Action<string> Saved;
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (IsDirty && e.CloseReason == CloseReason.UserClosing)
+        {
+            var r = MessageBox.Show(this, "Save changes to the flow \"" + Text.TrimEnd('*', ' ') + "\"?", "Unsaved flow", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+            if (r == DialogResult.Cancel) { e.Cancel = true; return; }
+            if (r == DialogResult.Yes) { BtnSave_Click(this, EventArgs.Empty); if (IsDirty) { e.Cancel = true; return; } }
+        }
+        base.OnFormClosing(e);
+    }
+
+    protected override string GetPersistString() { return ""; } // flow tabs are not restored with the layout
+
     public string CurrentFilePath { get; set; }
 
     private void BtnSave_Click(object sender, EventArgs e)
@@ -666,12 +750,15 @@ public class PipelineBuilderContent : DockContent
                 if (string.IsNullOrEmpty(safeName)) safeName = "Flow";
 
                 path = System.IO.Path.Combine(flowsDir, safeName + ".json");
+                if (System.IO.File.Exists(path) && MessageBox.Show(this, "A flow file named " + System.IO.Path.GetFileName(path) + " already exists. Replace it?",
+                        "Save flow", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                    return;
                 CurrentFilePath = path;
             }
 
             System.IO.File.WriteAllText(path, json);
             IsDirty = false; // clears dirty and updates tab text
-            MessageBox.Show("Flow saved to:\n" + path, "Saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (Saved != null) Saved(path);
         }
         catch (Exception ex)
         {

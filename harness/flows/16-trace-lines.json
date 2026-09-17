@@ -1,0 +1,21 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ]
+  },
+  "Meta": {
+    "Name": "Trace wrapper (lines + try/catch + profiling)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Trace Wrapper",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.TraceWrapperConfig",
+      "ConfigJson": "{\"TraceLines\":true,\"WrapTryCatch\":true,\"ProfileSpeed\":true,\"TraceFilePath\":\"${OutputDir}\\\\__trace_dump.json\"}"
+    }
+  ]
+}

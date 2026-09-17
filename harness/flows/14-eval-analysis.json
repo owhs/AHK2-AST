@@ -1,0 +1,21 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ]
+  },
+  "Meta": {
+    "Name": "Eval analysis (no export)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Eval Analysis",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.EvalAnalysisConfig",
+      "ConfigJson": "{\"ExportType\":0,\"LaunchBrowser\":false,\"CacheIncludes\":true,\"EnableWatchers\":false}"
+    }
+  ]
+}

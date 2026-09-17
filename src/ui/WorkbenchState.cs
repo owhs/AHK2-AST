@@ -29,6 +29,14 @@ namespace AHK2AST.UI
         public string BuildDescription { get; set; }
         public string BuildCopyright { get; set; }
 
+        // Workbench v2
+        public string AhkPath { get; set; }
+        public bool LiveParse { get; set; }
+        public string LastFlow { get; set; }
+        public System.Collections.Generic.List<string> Session { get; set; }
+        public string ActiveFile { get; set; }
+        public int EditorZoom { get; set; }
+
         public WorkbenchState()
         {
             // Defaults
@@ -44,6 +52,9 @@ namespace AHK2AST.UI
             BuildLtoChecked = true;
             BuildArcChecked = false;
             BuildPanicsChecked = false;
+            LiveParse = true;
+            EditorZoom = 100;
+            Session = new System.Collections.Generic.List<string>();
         }
 
         public static WorkbenchState Load()
@@ -58,6 +69,7 @@ namespace AHK2AST.UI
                     var state = serializer.Deserialize<WorkbenchState>(json);
                     if (state != null)
                     {
+                        if (state.EditorZoom < 50 || state.EditorZoom > 300) state.EditorZoom = 100;
                         if (state.RecentFiles == null)
                             state.RecentFiles = new System.Collections.Generic.List<string>();
                         return state;

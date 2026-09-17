@@ -408,9 +408,21 @@ namespace AHK2AST.Plugins
 
             // Let the standard emitter handle standard single expression/statement emission if possible,
             // but we override block statement formatting and spacing at the top level.
-            if (node.NodeType == "Program" || node.NodeType == "Include")
+            if (node.NodeType == "Program")
             {
                 return FormatChildren(node.ChildNodes, indent, isTopLevel: true);
+            }
+            if (node.NodeType == "Include")
+            {
+                // Same shape as the standard emitter: an inlined file between its begin/end markers, so formatting the
+                // output again sees the same file boundaries (and rebuilds the same Include from the markers).
+                if (node.ChildCount > 0 && !_opts.PreserveIncludes)
+                {
+                    string fileName = !string.IsNullOrEmpty(node.Value) ? System.IO.Path.GetFileName(node.Value) : "unknown";
+                    return pad + "; --- begin: " + fileName + " ---\n" + FormatChildren(node.ChildNodes, indent, isTopLevel: true)
+                        + "\n" + pad + "; --- end: " + fileName + " ---";
+                }
+                return AstEmitter.Emit(node, _opts, indent);
             }
             if (node.NodeType == "Block")
             {
@@ -431,6 +443,18 @@ namespace AHK2AST.Plugins
             if (children == null || children.Length == 0) return "";
             bool wantBlanks = _opts.EmitBlankLines;
             bool wantComments = _opts.EmitComments;
+            // Without comments there are no begin/end markers, so an inlined file is formatted as part of the code
+            // around it (formatting the output again then sees the same structure).
+            while (!wantComments && children.Any(c => c != null && c.NodeType == "Include" && c.ChildCount > 0)) // nested includes too
+            {
+                var flat = new List<AstNode>();
+                foreach (var c in children)
+                {
+                    if (c != null && c.NodeType == "Include" && c.ChildCount > 0) flat.AddRange(c.ChildNodes);
+                    else flat.Add(c);
+                }
+                children = flat.ToArray();
+            }
 
             var lines = new List<string>();
             int lastEmittedLine = -1;
@@ -471,12 +495,13 @@ namespace AHK2AST.Plugins
                 // Track end line
                 lastEmittedLine = GetMaxLine(child);
 
-                // Inline comments
+                // Inline comments: on the statement's first or last line (as in AstEmitter.EmitChildren)
+                int stmtLast = lastEmittedLine;
                 while (wantComments && i + 1 < children.Length
                     && children[i + 1] != null
                     && children[i + 1].NodeType == "Comment"
                     && children[i + 1].Line > 0
-                    && children[i + 1].Line == child.Line)
+                    && (children[i + 1].Line == child.Line || children[i + 1].Line == stmtLast))
                 {
                     i++;
                     emitted += "  " + children[i].Value;
@@ -509,62 +534,107 @@ namespace AHK2AST.Plugins
     // 3. MINIFIER PLUGIN
     // =========================================================================
 
+    /// <summary>
+    /// Minify presets, by what they promise:
+    /// Safe — the output behaves exactly like the input for every script (layout, folding, literal inlining, local
+    ///   renaming; functions using dynamic `%name%` access keep their locals).
+    /// Aggressive — also renames globals, functions and classes and joins statements onto one line. Names the script
+    ///   can reach at runtime (dynamic names, names written as strings, class names seen via Type()/__Class) are
+    ///   detected and kept, so ordinary scripts stay correct; heavy runtime reflection may still need Exclude.
+    /// Extreme — also renames properties and methods (and matching strings) and tries risky renames. Smallest
+    ///   output, but not compatible with every script (e.g. `obj.%"Pre_" name%`, COM/JSON property names,
+    ///   Gui event handlers given by name). Check the result; use Exclude Properties for the names that must stay.
+    /// </summary>
+    public enum MinifyLevel
+    {
+        Safe,
+        Aggressive,
+        Extreme,
+        Custom
+    }
+
     public class MinifyConfig
     {
+        private MinifyLevel _level = MinifyLevel.Safe;
+        private bool _inline, _escape, _fold, _renameLocals, _renameGlobals, _renameFunctions, _renameClasses;
+        private bool _renameProperties, _renamePropStrings, _risky, _oneLine;
+
+        [Category("Minify"), DisplayName("Level"), Description("Safe: always behaves the same. Aggressive: also renames globals/functions/classes and one-lines (runtime-reachable names are detected and kept). Extreme: also renames properties/methods; smallest, not compatible with every script. Changing an option below switches to Custom.")]
+        [RefreshProperties(RefreshProperties.All)]
+        public MinifyLevel Level
+        {
+            get { return _level; }
+            set { _level = value; ApplyLevelDefaults(); }
+        }
+
         [Category("Optimization"), DisplayName("Inline Single-Use Variables"), Description("If true, variables defined once and read exactly once will be replaced directly at their usage site.")]
-        public bool InlineSingleUseVariables { get; set; }
+        public bool InlineSingleUseVariables { get { return _inline; } set { Set(ref _inline, value); } }
 
         [Category("Optimization"), DisplayName("Escape Multiline Strings"), Description("If true, multiline continuation sections will be escaped into single-line strings with backtick escapes.")]
-        public bool EscapeMultilineStrings { get; set; }
+        public bool EscapeMultilineStrings { get { return _escape; } set { Set(ref _escape, value); } }
 
         [Category("Optimization"), DisplayName("Fold Constant Expressions"), Description("If true, performs compile-time evaluation of constant operations.")]
-        public bool FoldConstants { get; set; }
+        public bool FoldConstants { get { return _fold; } set { Set(ref _fold, value); } }
 
         [Category("Renaming"), DisplayName("Rename Local Variables"), Description("Rename local variables inside functions to short names.")]
-        public bool RenameLocalVariables { get; set; }
+        public bool RenameLocalVariables { get { return _renameLocals; } set { Set(ref _renameLocals, value); } }
 
         [Category("Renaming"), DisplayName("Rename Global Variables"), Description("Rename global variables to short names.")]
-        public bool RenameGlobalVariables { get; set; }
+        public bool RenameGlobalVariables { get { return _renameGlobals; } set { Set(ref _renameGlobals, value); } }
 
         [Category("Renaming"), DisplayName("Rename Functions"), Description("Rename user-defined functions to short names.")]
-        public bool RenameFunctions { get; set; }
+        public bool RenameFunctions { get { return _renameFunctions; } set { Set(ref _renameFunctions, value); } }
 
         [Category("Renaming"), DisplayName("Rename Classes"), Description("Rename user-defined classes to short names.")]
-        public bool RenameClasses { get; set; }
+        public bool RenameClasses { get { return _renameClasses; } set { Set(ref _renameClasses, value); } }
 
-        [Category("Renaming"), DisplayName("Rename Properties"), Description("Rename class properties and methods to short names.")]
-        public bool RenameProperties { get; set; }
+        [Category("Renaming"), DisplayName("Rename Properties"), Description("Rename class properties and methods to short names (Extreme: not compatible with every script).")]
+        public bool RenameProperties { get { return _renameProperties; } set { Set(ref _renameProperties, value); } }
 
         [Category("Renaming"), DisplayName("Rename Property String Literals"), Description("If true, renames string literals that match renamed properties/methods.")]
-        public bool RenamePropertyStringLiterals { get; set; }
+        public bool RenamePropertyStringLiterals { get { return _renamePropStrings; } set { Set(ref _renamePropStrings, value); } }
 
         [Category("Renaming"), DisplayName("Exclude Properties"), Description("Comma-separated list of properties, methods, or variables to exclude from renaming.")]
         public string ExcludeProperties { get; set; }
 
-        [Category("Renaming"), DisplayName("Try Risky Renames"), Description("If true, attempts risky renames such as local variables in methods with dynamic dereferences and bridge method/property names.")]
-        public bool TryRiskyRenames { get; set; }
+        [Category("Renaming"), DisplayName("Try Risky Renames"), Description("If true, renames even where the script may reach names at runtime (dynamic derefs, names in strings, Type()/__Class).")]
+        public bool TryRiskyRenames { get { return _risky; } set { Set(ref _risky, value); } }
 
         [Category("Optimization"), DisplayName("Aggressive 1-Lining"), Description("If true, merges consecutive expression statements onto a single line separated by commas.")]
-        public bool AggressiveOneLining { get; set; }
+        public bool AggressiveOneLining { get { return _oneLine; } set { Set(ref _oneLine, value); } }
 
         public MinifyConfig()
         {
-            InlineSingleUseVariables = true;
-            EscapeMultilineStrings = true;
-            FoldConstants = true;
-
-            RenameLocalVariables = false;
-            RenameGlobalVariables = false;
-            RenameFunctions = false;
-            RenameClasses = false;
-            RenameProperties = false;
-            RenamePropertyStringLiterals = true;
             ExcludeProperties = "";
-            TryRiskyRenames = false;
-            AggressiveOneLining = false;
+            ApplyLevelDefaults();
+        }
+
+        // A flag that departs from the level's preset makes the configuration Custom.
+        private void Set(ref bool field, bool value)
+        {
+            if (field == value) return;
+            field = value;
+            _level = MinifyLevel.Custom;
+        }
+
+        private void ApplyLevelDefaults()
+        {
+            if (_level == MinifyLevel.Custom) return;
+            bool aggressive = _level == MinifyLevel.Aggressive || _level == MinifyLevel.Extreme;
+            bool extreme = _level == MinifyLevel.Extreme;
+            _inline = true;
+            _escape = true;
+            _fold = true;
+            _renameLocals = true;
+            _renameGlobals = aggressive;
+            _renameFunctions = aggressive;
+            _renameClasses = aggressive;
+            _oneLine = aggressive;
+            _renameProperties = extreme;
+            _renamePropStrings = extreme;
+            _risky = extreme;
         }
     }
-
     public class MinifyPlugin : IFlowPlugin
     {
         public string Name { get { return "Formatting.Minify"; } }
@@ -592,27 +662,6 @@ namespace AHK2AST.Plugins
             "throw", "break", "continue", "return", "global", "local", "static", "class", "extends", "new", 
             "as", "until", "unset", "and", "or", "not", "is", "true", "false", "this", "super",
             
-            "MsgBox", "Send", "Click", "WinActive", "WinExist", "WinClose", "WinActivate", "ControlClick", 
-            "ControlSend", "ControlGetText", "ControlSetText", "Run", "RunWait", "ExitApp", "Exit", "Sleep", 
-            "ToolTip", "SetTimer", "FileExist", "FileRead", "FileAppend", "FileDelete", "FileCopy", "FileMove", 
-            "DirExist", "DirCreate", "DirDelete", "SplitPath", "SoundPlay", "SoundBeep", "ImageSearch", 
-            "PixelSearch", "PixelGetColor", "MouseGetPos", "MouseMove", "MouseClick", "MouseClickDrag", 
-            "SendMode", "SetTitleMatchMode", "SetWorkingDir", "CoordMode", "RegRead", "RegWrite", "RegDelete", 
-            "IniRead", "IniWrite", "IniDelete", "StrCompare", "StrLen", "SubStr", "Trim", "LTrim", "RTrim", 
-            "Format", "InStr", "RegExMatch", "RegExReplace", "StrReplace", "StrSplit", "StrLower", "StrUpper", 
-            "Ord", "Chr", "IsSet", "IsInteger", "IsFloat", "IsNumber", "IsString", "IsObject", "HasMethod", 
-            "HasProp", "HasVal", "Type", "ObjBindMethod", "ObjOwnProps", "Array", "Map", "Object", "String", 
-            "Number", "Integer", "Float", "Any", "Class", "Func", "Menu", "MenuBar", "Gui", "InputHook", 
-            "Hotstring", "HotIf", "Hotkey",
-            
-            "A_Index", "A_LineFile", "A_Args", "A_WorkingDir", "A_ScriptDir", "A_ScriptName", "A_ScriptFullPath", 
-            "A_LineNumber", "A_IsCompiled", "A_ExitReason", "A_IsAdmin", "A_IsSuspended", "A_IsPaused", 
-            "A_TitleMatchMode", "A_WorkingDir", "A_InitialWorkingDir", "A_LastError", "A_OSVersion", "A_PtrSize", 
-            "A_ScreenHeight", "A_ScreenWidth", "A_Hour", "A_Min", "A_Sec", "A_Mon", "A_Year", "A_WDAY", 
-            "A_YDAY", "A_YWeek", "A_Now", "A_NowUTC", "A_TickCount", "A_ComputerName", "A_UserName", "A_WinDir", 
-            "A_Temp", "A_AppData", "A_AppDataCommon", "A_Desktop", "A_DesktopCommon", "A_StartMenu", "A_StartMenuCommon", 
-            "A_Programs", "A_ProgramsCommon", "A_Startup", "A_StartupCommon", "A_MyDocuments", "A_Clipboard", 
-            "A_EventInfo", "A_ThisHotkey", "A_PriorHotkey", "A_PriorKey", "A_TimeSinceThisHotkey", "A_TimeSincePriorHotkey",
             
             "Prototype", "Base", "Name", "Length", "Count", "DefineProp", "DeleteProp", "GetOwnPropDesc", 
             "HasOwnProp", "OwnProps", "__New", "__Call", "__Get", "__Set", "__Delete", "__Enum", "__Item", "Call",
@@ -659,6 +708,9 @@ namespace AHK2AST.Plugins
             "Expand", "Collapse", "Select", "Bold", "Vis", "Icon", "Sort", "ReadOnly", "Wrap", "Password", "Number", "Multi"
         };
 
+        // Built-in functions / variables / classes: the shared table generated from the AutoHotkey docs (AhkBuiltins).
+        static MinifyPlugin() { foreach (var name in AhkBuiltins.AllNames()) ReservedNames.Add(name); }
+
         public MinifyPlugin()
         {
             Config = new MinifyConfig();
@@ -683,21 +735,21 @@ namespace AHK2AST.Plugins
             {
                 var shakerConfig = new TreeShakerConfig { FoldConstantExpressions = true };
                 var follower = new LogicFollowerEngine(shakerConfig);
-                follower.Analyze(root);
+                using (Prof.Time("minify.fold")) follower.FoldAndFlatten(root); // folding only: no reachability analysis needed
             }
 
             if (Config.InlineSingleUseVariables)
             {
-                InlineSingleUseVariablesInAst(root);
+                using (Prof.Time("minify.inline")) InlineSingleUseVariablesInAst(root);
                 if (Config.FoldConstants)
                 {
                     var shakerConfig = new TreeShakerConfig { FoldConstantExpressions = true };
                     var follower = new LogicFollowerEngine(shakerConfig);
-                    follower.Analyze(root);
+                    using (Prof.Time("minify.fold")) follower.FoldAndFlatten(root); // folding only: no reachability analysis needed
                 }
             }
 
-            RenameSymbolsInAst(root);
+            using (Prof.Time("minify.rename")) RenameSymbolsInAst(root);
 
             if (Config.EscapeMultilineStrings)
             {
@@ -718,7 +770,7 @@ namespace AHK2AST.Plugins
 
             // 2. Minified whitespace stripped emission
             var emitter = new MinifiedEmitter(Config);
-            return emitter.Emit(root);
+            using (Prof.Time("minify.emit")) return emitter.Emit(root);
         }
 
         private void CollectAllIdentifiersInAst(AstNode node, HashSet<string> identifiers)
@@ -746,9 +798,55 @@ namespace AHK2AST.Plugins
             }
         }
 
+        /// <summary>
+        /// Renames what the `%expr%` derefs of a dynamic name read. Each expression is parsed and renamed as code —
+        /// names through <paramref name="vars"/> (minus <paramref name="skipVars"/>, shadowed names), member names
+        /// through <paramref name="props"/> — then written back; the literal name text around the derefs is kept.
+        /// (Renaming by text also hit words after a dot and inside strings: `%this.valRef%` came out as `%b%`.)
+        /// </summary>
+        private string RenameDerefText(string text, Dictionary<string, string> vars, Dictionary<string, string> props, HashSet<string> skipVars)
+        {
+            if (string.IsNullOrEmpty(text) || text.IndexOf('%') < 0) return text;
+            return System.Text.RegularExpressions.Regex.Replace(text, "%([^%]*)%", m =>
+            {
+                var expr = AhkParser.ParseExpressionText(m.Groups[1].Value);
+                if (expr == null) return m.Value;
+                return RenameInExpression(expr, vars, props, skipVars) ? "%" + AstEmitter.Emit(expr).Trim() + "%" : m.Value;
+            });
+        }
+
+        private bool RenameInExpression(AstNode n, Dictionary<string, string> vars, Dictionary<string, string> props, HashSet<string> skipVars)
+        {
+            if (n == null) return false;
+            bool changed = false;
+            string v = n.Value;
+            if (n.NodeType == "Identifier" && v != null)
+            {
+                string nv;
+                if (v.IndexOf('%') >= 0) nv = RenameDerefText(v, vars, props, skipVars);
+                else nv = vars != null && !(skipVars != null && skipVars.Contains(v)) && vars.ContainsKey(v) ? vars[v] : v;
+                if (nv != v) { n.Value = nv; changed = true; }
+            }
+            else if (n.NodeType == "Member" && v != null)
+            {
+                string nv;
+                if (v.IndexOf('%') >= 0) nv = RenameDerefText(v, vars, props, skipVars);
+                else nv = props != null && props.ContainsKey(v) ? props[v] : v;
+                if (nv != v) { n.Value = nv; changed = true; }
+            }
+            foreach (var c in n.ChildNodes)
+                if (RenameInExpression(c, vars, props, skipVars)) changed = true;
+            return changed;
+        }
         private string GetRenamedIdentifier(string val, Dictionary<string, string> renameMap)
         {
             if (string.IsNullOrEmpty(val)) return val;
+            // Dynamic name `pre%a%mid%b%`: rename what is read inside each %...%, keep the literal text as-is.
+            int firstPct = val.IndexOf('%');
+            if (firstPct >= 0 && !(firstPct == 0 && val.Length > 2 && val.IndexOf('%', 1) == val.Length - 1))
+            {
+                return PercentDeref.Replace(val, m => GetRenamedIdentifier(m.Value, renameMap));
+            }
             if (val.StartsWith("%") && val.EndsWith("%") && val.Length > 2)
             {
                 string inner = val.Substring(1, val.Length - 2);
@@ -782,30 +880,80 @@ namespace AHK2AST.Plugins
 
         private bool InheritsFromCSModule(string className, LogicFollowerEngine analyzer)
         {
-            if (string.IsNullOrEmpty(className)) return false;
-            if (className.Equals("_CSModule", StringComparison.OrdinalIgnoreCase) || 
-                className.Equals("CSModule", StringComparison.OrdinalIgnoreCase))
+            // Walk the base chain; `class Error extends Error` (a nested class named after its global base) would
+            // otherwise loop forever, so each name is visited once.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (!string.IsNullOrEmpty(className) && seen.Add(className))
             {
-                return true;
+                if (className.Equals("_CSModule", StringComparison.OrdinalIgnoreCase) ||
+                    className.Equals("CSModule", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                LogicFollowerEngine.ClassInfo clInfo;
+                if (!analyzer.Classes.TryGetValue(className, out clInfo)) return false;
+                className = clInfo.BaseClass;
             }
-            LogicFollowerEngine.ClassInfo clInfo;
-            if (analyzer.Classes.TryGetValue(className, out clInfo))
+            return false;
+        }
+
+        static readonly System.Text.RegularExpressions.Regex PlainName = new System.Text.RegularExpressions.Regex(@"^[A-Za-z_][A-Za-z0-9_]*$");
+        static readonly System.Text.RegularExpressions.Regex PercentDeref = new System.Text.RegularExpressions.Regex("%[^%]*%");
+
+        /// <summary>The identifier-shaped string literals of the script (`"Counter"`, `'OnClick'`).</summary>
+        private static void CollectIdentifierStrings(AstNode node, HashSet<string> names)
+        {
+            if (node == null) return;
+            if (node.NodeType == "String" && node.Value != null && node.Value.Length >= 3)
             {
-                return InheritsFromCSModule(clInfo.BaseClass, analyzer);
+                string s = AhkStringHelper.UnescapeAhkString(node.Value);
+                if (PlainName.IsMatch(s)) names.Add(s);
             }
+            foreach (var c in node.ChildNodes)
+                CollectIdentifierStrings(c, names);
+        }
+
+        /// <summary>
+        /// A definition directly in the program, an included file, or under a hotkey / hotstring label
+        /// (`~ScrollLock::` followed by `Toggle(*) { ... }` defines the global function Toggle) is global.
+        /// </summary>
+        private static bool IsGlobalScopeParent(AstNode parent)
+        {
+            // Up through statement blocks (`if x { F() { ... } }` still defines a global F) until the program, or
+            // until a function / class / hotkey body, whose definitions are local to it.
+            AstNode child = null;
+            while (parent != null)
+            {
+                string t = parent.NodeType;
+                if (t == "Program" || t == "Include") return true;
+                if (t == "Method" || t == "Class" || t == "Property" || t == "FatArrow" || t == "FatArrowBody") return false;
+                if ((t == "Hotkey" || t == "Hotstring") && child != null && child.NodeType == "Block") return false;
+                child = parent;
+                parent = parent.Parent;
+            }
+            return false;
+        }
+        private static bool ObservesClassNames(AstNode node)
+        {
+            if (node == null) return false;
+            if (node.NodeType == "Member" && string.Equals(node.Value, "__Class", StringComparison.OrdinalIgnoreCase)) return true;
+            if (node.NodeType == "Call" && node.ChildCount > 0 && node.GetChild(0) != null && node.GetChild(0).NodeType == "Identifier"
+                && string.Equals(node.GetChild(0).Value, "Type", StringComparison.OrdinalIgnoreCase)) return true;
+            foreach (var c in node.ChildNodes)
+                if (ObservesClassNames(c)) return true;
             return false;
         }
 
         private void RenameSymbolsInAst(AstNode root)
         {
             var analyzer = new LogicFollowerEngine(new TreeShakerConfig { Profile = TreeShakingProfile.Off });
-            analyzer.Analyze(root);
+            using (Prof.Time("rename.analyze")) analyzer.Analyze(root);
 
             var preservedGlobals = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var r in ReservedNames) preservedGlobals.Add(r);
             
             // Proactively collect all original identifiers to prevent collisions
-            CollectAllIdentifiersInAst(root, preservedGlobals);
+            using (Prof.Time("rename.identifiers")) CollectAllIdentifiersInAst(root, preservedGlobals);
 
             // Add user exclusions to preservedGlobals
             var excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -823,6 +971,40 @@ namespace AHK2AST.Plugins
                 }
             }
             
+            // Dynamic names (`CALG_%x%`, `v%A_Index%`) can reach any variable whose name starts with their literal
+            // prefix, so those names must keep their spelling; one starting with `%` could reach anything.
+            var dynamicPrefixes = new List<string>();
+            bool unboundedDynamic = false;
+            CollectDynamicNamePrefixes(root, dynamicPrefixes, ref unboundedDynamic);
+            if (dynamicPrefixes.Count > 0 || unboundedDynamic)
+            {
+                foreach (var name in analyzer.Globals.Keys.Concat(analyzer.Functions.Keys).Concat(analyzer.Classes.Keys))
+                {
+                    if (unboundedDynamic || dynamicPrefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        excluded.Add(name);
+                        preservedGlobals.Add(name);
+                    }
+                }
+            }
+
+            // A global, function or class whose name the script also spells as a string may be reached through it at
+            // runtime (`%"Counter"%`, `%prefix name%`, `HasMethod(x, "Run")`, a name read from an ini...). Unless risky
+            // renames are on, those keep their names.
+            if (!Config.TryRiskyRenames)
+            {
+                var spelled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                CollectIdentifierStrings(root, spelled);
+                foreach (var name in analyzer.Globals.Keys.Concat(analyzer.Functions.Keys).Concat(analyzer.Classes.Keys))
+                {
+                    if (spelled.Contains(name))
+                    {
+                        excluded.Add(name);
+                        preservedGlobals.Add(name);
+                    }
+                }
+            }
+
             var csModuleClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (!Config.TryRiskyRenames)
             {
@@ -836,9 +1018,11 @@ namespace AHK2AST.Plugins
                 }
             }
 
-            if (!Config.RenameClasses)
+            // `Type(obj)` and `obj.__Class` hand a class's name to the script at runtime, so renaming classes would
+            // change what it sees (and compares against).
+            if (!Config.RenameClasses || (!Config.TryRiskyRenames && ObservesClassNames(root)))
             {
-                foreach (var k in analyzer.Classes.Keys) preservedGlobals.Add(k);
+                foreach (var k in analyzer.Classes.Keys) { preservedGlobals.Add(k); excluded.Add(k); }
             }
             if (!Config.RenameFunctions)
             {
@@ -857,6 +1041,10 @@ namespace AHK2AST.Plugins
                 foreach (var k in analyzer.Classes.Keys)
                 {
                     if (ReservedNames.Contains(k) || excluded.Contains(k) || csModuleClasses.Contains(k)) continue;
+                    // A nested class (`Sock.Error`) is a member of its outer class, not a global: renaming it as a global
+                    // would also rename every other use of that name (here the built-in Error).
+                    var clsNode = analyzer.Classes[k].Node;
+                    if (clsNode != null && clsNode.Parent != null && clsNode.Parent.NodeType != "Program" && clsNode.Parent.NodeType != "Include") continue;
                     
                     // Protect wrapper/runtime-checked classes from renaming
                     if (k.StartsWith("IUIAutomation", StringComparison.OrdinalIgnoreCase) ||
@@ -942,7 +1130,7 @@ namespace AHK2AST.Plugins
                 }
             }
 
-            ApplyGlobalAndPropertyRenames(root, globalRenames, propertyRenames, csModuleClasses, analyzer);
+            using (Prof.Time("rename.apply-global")) ApplyGlobalAndPropertyRenames(root, globalRenames, propertyRenames, csModuleClasses, analyzer);
 
             if (Config.RenameLocalVariables)
             {
@@ -952,7 +1140,7 @@ namespace AHK2AST.Plugins
                 {
                     if (!IsNestedMethod(method))
                     {
-                        RenameLocalVariablesInMethod(method, analyzer, globalRenames);
+                        using (Prof.Time("rename.locals")) RenameLocalVariablesInMethod(method, analyzer, globalRenames);
                     }
                 }
             }
@@ -1141,7 +1329,7 @@ namespace AHK2AST.Plugins
                 }
                 else
                 {
-                    bool isTopLevel = (node.Parent != null && (node.Parent.NodeType == "Program" || node.Parent.NodeType == "Include"));
+                    bool isTopLevel = IsGlobalScopeParent(node.Parent);
                     if (isTopLevel)
                     {
                         node.Value = GetRenamedIdentifier(node.Value, globalRenames);
@@ -1154,13 +1342,20 @@ namespace AHK2AST.Plugins
             }
             else if (node.NodeType == "StaticAssign" || node.NodeType == "Declaration")
             {
-                if (isDirectClassChild)
+                // Chained items (`static types := Map(), types.CaseSense := false`) are class members too.
+                bool chainedClassItem = node.Parent != null && node.Parent.NodeType == "StaticAssign"
+                    && node.Parent.Parent != null && node.Parent.Parent.NodeType == "Class";
+                if (isDirectClassChild || chainedClassItem)
                 {
-                    node.Value = GetRenamedIdentifier(node.Value, propertyRenames);
+                    // Dotted item `types.CaseSense`: every segment is a property name (built-ins stay reserved).
+                    if (node.Value != null && node.Value.IndexOf('.') > 0)
+                        node.Value = string.Join(".", node.Value.Split('.').Select(seg => GetRenamedIdentifier(seg, propertyRenames)));
+                    else
+                        node.Value = GetRenamedIdentifier(node.Value, propertyRenames);
                 }
                 else
                 {
-                    bool isTopLevel = (node.Parent != null && (node.Parent.NodeType == "Program" || node.Parent.NodeType == "Include"));
+                    bool isTopLevel = IsGlobalScopeParent(node.Parent);
                     if (isTopLevel || (node.NodeType == "Declaration" && node.Metadata == "global"))
                     {
                         node.Value = GetRenamedIdentifier(node.Value, globalRenames);
@@ -1169,17 +1364,13 @@ namespace AHK2AST.Plugins
             }
             else if (node.NodeType == "Identifier")
             {
-                if (currentShadowed == null || !currentShadowed.Contains(node.Value))
+                if (node.Value != null && node.Value.IndexOf('%') >= 0)
+                {
+                    node.Value = RenameDerefText(node.Value, globalRenames, propertyRenames, currentShadowed);
+                }
+                else if (currentShadowed == null || !currentShadowed.Contains(node.Value))
                 {
                     node.Value = GetRenamedIdentifier(node.Value, globalRenames);
-                    if (node.Value != null && node.Value.StartsWith("%") && node.Value.EndsWith("%") && node.Value.Length > 2)
-                    {
-                        string inner = node.Value.Substring(1, node.Value.Length - 2);
-                        if (!IsSimpleIdentifier(inner))
-                        {
-                            node.Value = GetRenamedIdentifier(node.Value, propertyRenames);
-                        }
-                    }
                 }
             }
             else if (node.NodeType == "Member")
@@ -1204,14 +1395,10 @@ namespace AHK2AST.Plugins
                 }
                 else
                 {
-                    if (node.Value != null && node.Value.StartsWith("%") && node.Value.EndsWith("%") && node.Value.Length > 2)
+                    if (node.Value != null && node.Value.IndexOf('%') >= 0)
                     {
-                        node.Value = GetRenamedIdentifier(node.Value, globalRenames);
-                        string inner = node.Value.Substring(1, node.Value.Length - 2);
-                        if (!IsSimpleIdentifier(inner))
-                        {
-                            node.Value = GetRenamedIdentifier(node.Value, propertyRenames);
-                        }
+                        // `obj.%expr%` / `obj.On%expr%`: the derefs are code (variables and members they read).
+                        node.Value = RenameDerefText(node.Value, globalRenames, propertyRenames, currentShadowed);
                     }
                     else if (node.Value != null && globalRenames.ContainsKey(node.Value) && analyzer.Classes.ContainsKey(node.Value))
                     {
@@ -1422,6 +1609,17 @@ namespace AHK2AST.Plugins
                         refs.Add(val);
                 }
             }
+            // Names bound in nested functions / lambdas (`(&a?, &b?) => ...`) are taken too: a local renamed to one
+            // of them would be captured by it instead of the outer variable.
+            else if ((node.NodeType == "Parameter" || node.NodeType == "Declaration" || node.NodeType == "StaticAssign" || node.NodeType == "Method")
+                     && !string.IsNullOrEmpty(node.Value))
+            {
+                refs.Add(node.Value);
+            }
+            else if (node.NodeType == "Catch" && !string.IsNullOrEmpty(node.Metadata))
+            {
+                refs.Add(node.Metadata);
+            }
             foreach (var child in node.ChildNodes)
             {
                 CollectReferencedIdentifiers(child, refs);
@@ -1537,13 +1735,15 @@ namespace AHK2AST.Plugins
 
             if (node.NodeType == "Identifier")
             {
-                node.Value = GetRenamedIdentifier(node.Value, localMap);
+                node.Value = node.Value != null && node.Value.IndexOf('%') >= 0
+                    ? RenameDerefText(node.Value, localMap, null, null)
+                    : GetRenamedIdentifier(node.Value, localMap);
             }
             else if (node.NodeType == "Member")
             {
-                if (node.Value != null && node.Value.StartsWith("%") && node.Value.EndsWith("%") && node.Value.Length > 2)
+                if (node.Value != null && node.Value.IndexOf('%') >= 0) // `obj.%expr%`, `obj.On%expr%`
                 {
-                    node.Value = GetRenamedIdentifier(node.Value, localMap);
+                    node.Value = RenameDerefText(node.Value, localMap, null, null);
                 }
             }
             else if (node.NodeType == "Declaration" || node.NodeType == "StaticAssign" || node.NodeType == "Parameter")
@@ -1593,6 +1793,14 @@ namespace AHK2AST.Plugins
 
             AnalyzeVariableUsage(root, assignmentCount, readCount, lastAssignmentNode, lastReadNode, mutatedVars, isWrite: false);
 
+            // Variables reachable through a dynamic name (`v%i%`, `%name%`) have reads/writes we can't count.
+            var dynPrefixes = new List<string>();
+            bool unboundedDynamic = false;
+            CollectDynamicNamePrefixes(root, dynPrefixes, ref unboundedDynamic);
+            if (unboundedDynamic || HasPlainVariableDeref(root)) return;
+            foreach (var name in assignmentCount.Keys)
+                if (dynPrefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase))) mutatedVars.Add(name);
+
             // Identify variables that are assigned once and read once
             var singleUseVars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var kv in assignmentCount)
@@ -1607,7 +1815,13 @@ namespace AHK2AST.Plugins
                         var rhs = assignNode.NodeType == "Declaration"
                             ? (assignNode.ChildCount > 0 ? assignNode.GetChild(0) : null)
                             : (assignNode.ChildCount > 1 ? assignNode.GetChild(1) : null);
-                        if (rhs != null && (rhs.NodeType == "String" || rhs.NodeType == "Number" || rhs.NodeType == "Identifier" || rhs.NodeType == "Literal"))
+                        // Only literals: a variable's value can change between the assignment and the read
+                        // (`tmp := p, p := q, q := tmp`; A_Index, A_TickCount). And the read must be in the same
+                        // function as the assignment (or the assignment global), since the analysis is name-based.
+                        var readNode = lastReadNode.ContainsKey(varName) ? lastReadNode[varName] : null;
+                        var assignFn = EnclosingFunction(assignNode);
+                        bool sameScope = assignFn == null || (readNode != null && EnclosingFunction(readNode) == assignFn);
+                        if (rhs != null && sameScope && (rhs.NodeType == "String" || rhs.NodeType == "Number" || rhs.NodeType == "Literal"))
                         {
                             singleUseVars.Add(varName);
                         }
@@ -1634,9 +1848,38 @@ namespace AHK2AST.Plugins
             return true;
         }
 
+        /// <summary>True if the tree reads a variable by computed name: `%x%` as a value (not a member name).</summary>
+        private static bool HasPlainVariableDeref(AstNode node)
+        {
+            if (node == null) return false;
+            if (node.NodeType == "Identifier" && !string.IsNullOrEmpty(node.Value) && node.Value.Length > 2
+                && node.Value[0] == '%' && node.Value.IndexOf('%', 1) == node.Value.Length - 1)
+                return true;
+            foreach (var c in node.ChildNodes) if (HasPlainVariableDeref(c)) return true;
+            return false;
+        }
+
+        /// <summary>Literal prefixes of dynamic names (`pre%x%`) in the tree; `unbounded` if one starts with `%` (`%a%b`).</summary>
+        private static void CollectDynamicNamePrefixes(AstNode node, List<string> prefixes, ref bool unbounded)
+        {
+            if (node == null) return;
+            if (node.NodeType == "Identifier" && !string.IsNullOrEmpty(node.Value))
+            {
+                string v = node.Value;
+                int p = v.IndexOf('%');
+                bool pureDeref = p == 0 && v.Length > 2 && v.IndexOf('%', 1) == v.Length - 1;
+                if (p > 0) { if (!prefixes.Contains(v.Substring(0, p))) prefixes.Add(v.Substring(0, p)); }
+                else if (p == 0 && !pureDeref) unbounded = true;
+            }
+            foreach (var c in node.ChildNodes) CollectDynamicNamePrefixes(c, prefixes, ref unbounded);
+        }
+
         private bool HasDynamicDeref(AstNode node)
         {
             if (node == null) return false;
+            if (node.NodeType == "Identifier" && !string.IsNullOrEmpty(node.Value) && node.Value.IndexOf('%') >= 0
+                && !(node.Value[0] == '%' && node.Value.Length > 2 && node.Value.IndexOf('%', 1) == node.Value.Length - 1))
+                return true; // `pre%x%` / `%a%b`: locals may be read or written dynamically
             if (node.NodeType != "Member" && !string.IsNullOrEmpty(node.Value) &&
                 node.Value.StartsWith("%") && node.Value.EndsWith("%") && node.Value.Length > 2)
             {
@@ -1682,6 +1925,9 @@ namespace AHK2AST.Plugins
                     string varName = lhs.Value;
                     assignmentCount[varName] = assignmentCount.ContainsKey(varName) ? assignmentCount[varName] + 1 : 1;
                     lastAssignmentNode[varName] = node;
+                    // Only a plain statement in a statement list is a candidate: an assignment inside an expression
+                    // (`if (x && q := 42)`, `&(p := 0)`) may not run, or runs mid-expression.
+                    if (!IsListStatement(node)) mutatedVars.Add(varName);
                 }
                 else if (lhs != null)
                 {
@@ -1699,11 +1945,15 @@ namespace AHK2AST.Plugins
                 {
                     assignmentCount[varName] = assignmentCount.ContainsKey(varName) ? assignmentCount[varName] + 1 : 1;
                     lastAssignmentNode[varName] = node;
+                    // Class variables are object members (read as this.x), and chained / nested declarations can't
+                    // be removed on their own: never inline those.
+                    bool classMember = node.Parent != null && (node.Parent.NodeType == "Class" || node.Parent.NodeType == "StaticAssign" || node.Parent.NodeType == "Declaration");
+                    if (classMember || !IsListStatement(node) || node.ChildCount > 1) mutatedVars.Add(varName);
                 }
 
-                if (node.ChildCount > 0)
+                for (int ci = 0; ci < node.ChildCount; ci++)
                 {
-                    AnalyzeVariableUsage(node.GetChild(0), assignmentCount, readCount, lastAssignmentNode, lastReadNode, mutatedVars, isWrite: false);
+                    AnalyzeVariableUsage(node.GetChild(ci), assignmentCount, readCount, lastAssignmentNode, lastReadNode, mutatedVars, isWrite: false);
                 }
                 return;
             }
@@ -1711,7 +1961,14 @@ namespace AHK2AST.Plugins
             if ((node.NodeType == "UnaryExpr" && (node.Value == "++" || node.Value == "--" || node.Value == "&")) ||
                 (node.NodeType == "PostfixExpr" && (node.Value == "++" || node.Value == "--")))
             {
+                // The target may be wrapped: `&(p := 0)` passes p itself to be written by the callee.
                 var target = node.ChildCount > 0 ? node.GetChild(0) : null;
+                while (target != null)
+                {
+                    if (target.NodeType == "Grouped" && target.ChildCount > 0) target = target.GetChild(0);
+                    else if (target.NodeType == "BinaryExpr" && TokenLikeAssignment(target.Value) && target.ChildCount > 0) target = target.GetChild(0);
+                    else break;
+                }
                 if (target != null && target.NodeType == "Identifier")
                 {
                     mutatedVars.Add(target.Value);
@@ -1770,6 +2027,31 @@ namespace AHK2AST.Plugins
             {
                 AnalyzeVariableUsage(child, assignmentCount, readCount, lastAssignmentNode, lastReadNode, mutatedVars, isWrite);
             }
+        }
+
+        static bool TokenLikeAssignment(string op)
+        {
+            return op == ":=" || op == "+=" || op == "-=" || op == "*=" || op == "/=" || op == "//=" || op == ".=" || op == "|="
+                || op == "&=" || op == "^=" || op == "<<=" || op == ">>=" || op == ">>>=" || op == "??=";
+        }
+
+        /// <summary>True for a statement directly inside a statement list (Program/Block/Include/case body, or a
+        /// comma sequence that is itself such a statement): the only assignments that can be removed safely.</summary>
+        static bool IsListStatement(AstNode n)
+        {
+            var p = n.Parent;
+            while (p != null && p.NodeType == "MultiStatement") { n = p; p = p.Parent; }
+            if (p == null) return true;
+            return p.NodeType == "Program" || p.NodeType == "Block" || p.NodeType == "Include"
+                || p.NodeType == "CaseBody" || p.NodeType == "DefaultBody";
+        }
+
+        /// <summary>The function (Method / fat-arrow) a node belongs to, or null at global level.</summary>
+        static AstNode EnclosingFunction(AstNode n)
+        {
+            for (var p = n == null ? null : n.Parent; p != null; p = p.Parent)
+                if (p.NodeType == "Method" || p.NodeType == "FatArrow") return p;
+            return null;
         }
 
         private void ReplaceAndPruneVariables(AstNode node, HashSet<string> singleUseVars, Dictionary<string, AstNode> lastAssignmentNode)
@@ -1833,16 +2115,31 @@ namespace AHK2AST.Plugins
             return child != null ? Emit(child) : "";
         }
 
+        // Leading operands of statements that AHK would otherwise read as a function-call statement (see StatementHead).
+        private HashSet<AstNode> _heads;
+
         public string Emit(AstNode node)
         {
             if (node == null) return "";
+            bool outermost = _heads == null;
+            if (outermost) _heads = StatementHead.Collect(node);
+            try
+            {
+                string s = EmitCore(node);
+                return _heads.Contains(node) ? "(" + s + ")" : s;
+            }
+            finally { if (outermost) _heads = null; }
+        }
 
+        private string EmitCore(AstNode node)
+        {
             switch (node.NodeType)
             {
                 case "Program":
                     return EmitChildren(node.ChildNodes);
 
                 case "Directive":
+                    if (AstEmitter.IsParsedHotIf(node)) return "#HotIf " + Emit(node.GetChild(0));
                     return node.Value;
 
                 case "Class":
@@ -1915,7 +2212,7 @@ namespace AHK2AST.Plugins
                         string wbody = node.ChildCount > 1 ? SafeEmitChild(node, 1) : "";
                         if (string.IsNullOrEmpty(wbody) || wbody.Trim() == "") wbody = "{\n}";
                         string wsep = (!string.IsNullOrEmpty(wbody) && !wbody.StartsWith("{")) ? "\n" : " ";
-                        return "while(" + wcond + ")" + wsep + wbody;
+                        return "while(" + wcond + ")" + wsep + wbody + LoopTail(node, 2);
                     }
 
                 case "Return":
@@ -1948,7 +2245,23 @@ namespace AHK2AST.Plugins
                     return SafeEmitChild(node, 0) + SafeEmitChild(node, 1);
 
                 case "Arguments":
-                    return "(" + string.Join(",", node.ChildNodes.Select(c => Emit(c))) + ")";
+                    {
+                        // Function-call statements stay paren-less (shorter); inside a one-line comma chain they
+                        // need parens, or the call would swallow the following statements as arguments.
+                        if (node.Metadata == "command" && !_parenCommandCalls)
+                        {
+                            if (node.ChildCount == 0) return "";
+                            var csb = new StringBuilder(" ");
+                            var cargs = node.ChildNodes;
+                            for (int i = 0; i < cargs.Length; i++)
+                            {
+                                if (i > 0) csb.Append(",");
+                                if (cargs[i] != null && cargs[i].NodeType != "Omitted") csb.Append(Emit(cargs[i]));
+                            }
+                            return csb.ToString();
+                        }
+                        return "(" + string.Join(",", node.ChildNodes.Select(c => Emit(c))) + ")";
+                    }
 
                 case "Member":
                     return SafeEmitChild(node, 0) + "." + node.Value;
@@ -2036,7 +2349,7 @@ namespace AHK2AST.Plugins
                         string fbody = node.ChildCount > 2 ? Emit(node.GetChild(2)) : "";
                         if (string.IsNullOrEmpty(fbody) || fbody.Trim() == "") fbody = "{\n}";
                         string fsep = (!string.IsNullOrEmpty(fbody) && !fbody.StartsWith("{")) ? "\n" : " ";
-                        return "for " + fvars + " in " + fcoll + fsep + fbody;
+                        return "for " + fvars + " in " + fcoll + fsep + fbody + LoopTail(node, 3);
                     }
 
                 case "ForVars":
@@ -2045,8 +2358,7 @@ namespace AHK2AST.Plugins
                 case "Loop":
                     {
                         string variant = !string.IsNullOrEmpty(node.Value) ? " " + node.Value : "";
-                        var until = node.ChildNodes.FirstOrDefault(c => c != null && c.NodeType == "Until");
-                        var nonUntilChildren = node.ChildNodes.Where(c => c != null && c.NodeType != "Until").ToList();
+                        var nonUntilChildren = node.ChildNodes.Where(c => c != null && c.NodeType != "Until" && c.NodeType != "Else").ToList();
                         AstNode lbody = null;
                         var args = new List<AstNode>();
                         if (nonUntilChildren.Count > 0)
@@ -2070,8 +2382,7 @@ namespace AHK2AST.Plugins
                         {
                             result += " {\n}";
                         }
-                        if (until != null) result += "\n" + Emit(until);
-                        return result;
+                        return result + LoopTail(node, 0);
                     }
 
                 case "MultiStatement":
@@ -2106,7 +2417,7 @@ namespace AHK2AST.Plugins
                         }
                         string valStr = string.Join(",", values);
                         string bodyStr = node.ChildCount > 0 ? SafeEmitChild(node, node.ChildCount - 1) : "";
-                        string sep = (!string.IsNullOrEmpty(bodyStr) && !bodyStr.StartsWith("{") && !bodyStr.StartsWith("\n")) ? "\n" : "";
+                        string sep = (!string.IsNullOrEmpty(bodyStr) && !bodyStr.StartsWith("\n")) ? "\n" : "" /* a block can't share the case line */;
                         return "case " + valStr + ":" + sep + bodyStr;
                     }
 
@@ -2146,14 +2457,38 @@ namespace AHK2AST.Plugins
                 case "Continue":
                     return "continue" + (node.ChildCount > 0 ? " " + SafeEmitChild(node, 0) : "");
 
+                case "Goto":
+                    return "goto " + node.Value;
+
                 case "New":
                     return "new " + (node.ChildCount > 0 ? SafeEmitChild(node, 0) : "");
 
+                case "Remap":
+                    return node.Value + "::" + (node.ChildCount > 0 && node.GetChild(0) != null ? node.GetChild(0).Value : "");
+
                 case "Hotkey":
-                    return node.Value + "::" + (node.ChildCount > 0 ? SafeEmitChild(node, 0) : "");
+                    {
+                        // Only an inline action or a block may share the hotkey's line; anything else (a stacked
+                        // hotkey `~*Shift::` + `~*Ctrl::f()`, a body on the next line) keeps its own line.
+                        var kbody = node.ChildCount > 0 ? node.GetChild(0) : null;
+                        if (kbody == null) return node.Value + "::";
+                        string ks = Emit(kbody);
+                        bool sameLine = (kbody.NodeType == "Block" && !(node.Value ?? "").EndsWith(":")) || node.Metadata == "inline";
+                        return node.Value + "::" + (sameLine ? "" : "\n") + ks;
+                    }
 
                 case "Hotstring":
-                    return node.Value;
+                    {
+                        // The action (an X-option expression, an inline statement or a block) is the child.
+                        var hbody = node.ChildCount > 0 ? node.GetChild(0) : null;
+                        if (hbody == null) return node.Value;
+                        string hs = Emit(hbody);
+                        bool inlineAction = (node.Metadata ?? "").StartsWith("inline");
+                        // `::btw::` ⏎ `{`: on the same line `{` would be replacement text
+                        if (hbody.NodeType == "Block") return node.Value + (inlineAction ? " " : "\n") + hs;
+                        if (inlineAction) return node.Value + hs;
+                        return node.Value + "\n" + hs;
+                    }
 
                 case "StaticAssign":
                     {
@@ -2177,6 +2512,10 @@ namespace AHK2AST.Plugins
                                         sb.Append(":=").Append(Emit(chainChild.GetChild(0)));
                                     }
                                 }
+                                else if (chainChild.NodeType == "Declaration")
+                                {
+                                    sb.Append(",").Append(chainChild.Value); // chained bare name: no repeated `static`
+                                }
                                 else
                                 {
                                     sb.Append(",").Append(Emit(chainChild));
@@ -2194,7 +2533,11 @@ namespace AHK2AST.Plugins
                         int startChainedIdx = 0;
                         if (node.ChildCount > 0 && node.GetChild(0).NodeType != "Declaration")
                         {
-                            sb.Append(":=").Append(Emit(node.GetChild(0)));
+                            var dinit = node.GetChild(0);
+                            if (AstEmitter.IsCompoundDeclarationInit(node, dinit))
+                                sb.Append(dinit.Value).Append(Emit(dinit.GetChild(1)));
+                            else
+                                sb.Append(":=").Append(Emit(dinit));
                             startChainedIdx = 1;
                         }
                         for (int idx = startChainedIdx; idx < node.ChildCount; idx++)
@@ -2202,7 +2545,11 @@ namespace AHK2AST.Plugins
                             var child = node.GetChild(idx);
                             if (child != null && child.NodeType == "Declaration")
                             {
-                                sb.Append("\n").Append(Emit(child));
+                                // chained item of the same statement: `global a,b:=1`
+                                string item = Emit(child);
+                                string scope = string.IsNullOrEmpty(child.Metadata) ? "" : child.Metadata + " ";
+                                if (scope.Length > 0 && item.StartsWith(scope)) item = item.Substring(scope.Length);
+                                sb.Append(",").Append(item);
                             }
                         }
                         return sb.ToString();
@@ -2253,7 +2600,7 @@ namespace AHK2AST.Plugins
                 case "Default":
                     {
                         string bodyStr = node.ChildCount > 0 ? SafeEmitChild(node, 0) : "";
-                        string sep = (!string.IsNullOrEmpty(bodyStr) && !bodyStr.StartsWith("{") && !bodyStr.StartsWith("\n")) ? "\n" : "";
+                        string sep = (!string.IsNullOrEmpty(bodyStr) && !bodyStr.StartsWith("\n")) ? "\n" : "" /* a block can't share the case line */;
                         return "default:" + sep + bodyStr;
                     }
 
@@ -2288,6 +2635,18 @@ namespace AHK2AST.Plugins
             }
         }
 
+        // A loop's `until` / `else` children (from index `from`), each on its own line.
+        private string LoopTail(AstNode loop, int from)
+        {
+            var sb = new StringBuilder();
+            for (int i = from; i < loop.ChildCount; i++)
+            {
+                var c = loop.GetChild(i);
+                if (c != null && (c.NodeType == "Until" || c.NodeType == "Else")) sb.Append("\n").Append(Emit(c));
+            }
+            return sb.ToString();
+        }
+
         private bool ContainsFatArrow(AstNode node)
         {
             if (node == null) return false;
@@ -2299,10 +2658,16 @@ namespace AHK2AST.Plugins
             return false;
         }
 
+        private bool _parenCommandCalls;
+
         private bool IsCommaChainable(AstNode node)
         {
             if (node == null) return false;
             if (ContainsFatArrow(node)) return false;
+            // `Goto(expr)` is a control-flow statement, not a function: it can't sit in a comma chain.
+            if (node.NodeType == "Call" && node.ChildCount > 0 && node.GetChild(0) != null && node.GetChild(0).NodeType == "Identifier"
+                && string.Equals(node.GetChild(0).Value, "goto", StringComparison.OrdinalIgnoreCase))
+                return false;
             switch (node.NodeType)
             {
                 case "Call":
@@ -2335,6 +2700,21 @@ namespace AHK2AST.Plugins
         private string EmitChildren(AstNode[] children)
         {
             if (children == null || children.Length == 0) return "";
+            // A bare block right after `f(x)` would make that call a function definition; blocks have no scope.
+            for (int bi = 0; bi < children.Length; bi++)
+            {
+                // (a paren-less `f x` can come out as `f(x)` when one-lined, so any call on a name counts here)
+                var prev = bi > 0 ? children[bi - 1] : null;
+                bool afterCall = prev != null && prev.NodeType == "Call" && prev.ChildCount > 0 && prev.GetChild(0) != null && prev.GetChild(0).NodeType == "Identifier";
+                if (children[bi] != null && children[bi].NodeType == "Block" && (afterCall || AstEmitter.FollowsFunctionHeaderLike(children, bi)))
+                {
+                    var flat = new List<AstNode>(children.Take(bi));
+                    flat.AddRange(children[bi].ChildNodes);
+                    flat.AddRange(children.Skip(bi + 1));
+                    children = flat.ToArray();
+                    bi--;
+                }
+            }
             var lines = new List<string>();
             var currentChain = new List<string>();
             foreach (var child in children)
@@ -2343,7 +2723,10 @@ namespace AHK2AST.Plugins
                 bool isChainable = IsCommaChainable(child);
                 if (isChainable && Config != null && Config.AggressiveOneLining)
                 {
-                    string emitted = Emit(child);
+                    _parenCommandCalls = true;
+                    string emitted;
+                    try { emitted = Emit(child); }
+                    finally { _parenCommandCalls = false; }
                     if (!string.IsNullOrEmpty(emitted))
                     {
                         currentChain.Add(emitted);
@@ -2532,60 +2915,60 @@ namespace AHK2AST.Plugins
             return root;
         }
 
+        // Constant values follow AhkConst (Integer/Float/String, AHK truthiness); anything uncertain is left unfolded.
         private object GetConstantValue(AstNode node)
         {
             if (node == null) return null;
-            if (node.NodeType == "Grouped" && node.ChildCount > 0)
+            if (node.NodeType == "Grouped" && node.ChildCount == 1)
             {
                 return GetConstantValue(node.GetChild(0));
             }
-            if (node.NodeType == "Number")
+            if ((node.NodeType == "Identifier" || node.NodeType == "Literal") && string.Equals(node.Value, "A_IsCompiled", StringComparison.OrdinalIgnoreCase))
             {
-                double val;
-                if (double.TryParse(node.Value, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out val))
-                    return val;
-                return null;
+                if (Config.BuildStateOptimize == BuildStateOptimize.AssumeCompiled) return 1L;
+                if (Config.BuildStateOptimize == BuildStateOptimize.AssumeUncompiled) return 0L;
             }
-            if (node.NodeType == "String")
-            {
-                return AhkStringHelper.UnescapeAhkString(node.Value);
-            }
-            if (node.NodeType == "Identifier" || node.NodeType == "Literal")
-            {
-                if (node.Value.Equals("true", StringComparison.OrdinalIgnoreCase)) return true;
-                if (node.Value.Equals("false", StringComparison.OrdinalIgnoreCase)) return false;
-                if (Config.BuildStateOptimize == BuildStateOptimize.AssumeCompiled && node.Value.Equals("A_IsCompiled", StringComparison.OrdinalIgnoreCase)) return true;
-                if (Config.BuildStateOptimize == BuildStateOptimize.AssumeUncompiled && node.Value.Equals("A_IsCompiled", StringComparison.OrdinalIgnoreCase)) return false;
-            }
-            return null;
-        }
-
-        private bool IsTruthy(object val)
-        {
-            if (val == null) return false;
-            if (val is bool) return (bool)val;
-            if (val is double) return (double)val != 0;
-            if (val is string) return !string.IsNullOrEmpty((string)val);
-            return true;
+            return AhkConst.Get(node);
         }
 
         private AstNode CreateConstantNode(object val, int line, int col)
         {
-            if (val is double || val is float || val is int || val is long)
+            return AhkConst.ToNode(val, line, col);
+        }
+
+        /// <summary>
+        /// Truth of a condition when it is decided at compile time. Only truthiness matters here, so a constant right
+        /// side decides too (`x && false` is false) as long as the left side has no effects to keep.
+        /// </summary>
+        private bool? ConditionTruth(AstNode node)
+        {
+            if (node == null) return null;
+            if (node.NodeType == "Grouped" && node.ChildCount == 1) return ConditionTruth(node.GetChild(0));
+            if (node.NodeType == "LogicalNot" || (node.NodeType == "UnaryExpr" && (node.Value == "!" || string.Equals(node.Value, "not", StringComparison.OrdinalIgnoreCase))))
             {
-                string strVal = Convert.ToString(val, System.Globalization.CultureInfo.InvariantCulture);
-                return new AstNode("Number", line, col) { Value = strVal };
+                bool? inner = node.ChildCount > 0 ? ConditionTruth(node.GetChild(0)) : null;
+                return inner.HasValue ? !inner.Value : (bool?)null;
             }
-            if (val is string)
+            if (node.NodeType == "BinaryExpr" && node.ChildCount == 2 && IsLogicalOp(node.Value))
             {
-                string strVal = (string)val;
-                return new AstNode("String", line, col) { Value = AhkStringHelper.EscapeAhkString(strVal) };
+                var left = node.GetChild(0);
+                bool? l = ConditionTruth(left), r = ConditionTruth(node.GetChild(1));
+                bool isOr = node.Value == "||" || node.Value.Equals("or", StringComparison.OrdinalIgnoreCase);
+                bool pure = !HasSideEffects(left);
+                if (isOr)
+                {
+                    if (l == true || (r == true && pure)) return true;
+                    if (l == false && r == false) return false;
+                }
+                else
+                {
+                    if (l == false || (r == false && pure)) return false;
+                    if (l == true && r == true) return true;
+                }
+                return null;
             }
-            if (val is bool)
-            {
-                return new AstNode("Identifier", line, col) { Value = (bool)val ? "true" : "false" };
-            }
-            return null;
+            object v = GetConstantValue(node);
+            return v != null ? AhkConst.Truthy(v) : null;
         }
 
         private bool HasSideEffects(AstNode node)
@@ -2688,6 +3071,19 @@ namespace AHK2AST.Plugins
             return false;
         }
 
+        private static bool IsScriptWideDirective(string directive)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(directive ?? "", @"^\s*#(\w+)");
+            if (!m.Success) return false;
+            switch (m.Groups[1].Value.ToLowerInvariant())
+            {
+                case "requires": case "singleinstance": case "notrayicon": case "persistent": case "winactivateforce":
+                case "errorstdout": case "dllload": case "include":
+                    return true;
+            }
+            return false;
+        }
+
         private AstNode OptimiseNode(AstNode node, HashSet<string> seenDirectives)
         {
             if (node == null) return null;
@@ -2698,7 +3094,9 @@ namespace AHK2AST.Plugins
                 foreach (var child in node.ChildNodes)
                 {
                     if (child == null) continue;
-                    if (child.NodeType == "Directive")
+                    // Only script-wide directives are deduplicated; positional ones (#HotIf, #InputLevel, #HotString,
+                    // #UseHook, #MaxThreads*, #SuspendExempt, ...) apply to what follows and repeat on purpose.
+                    if (child.NodeType == "Directive" && IsScriptWideDirective(child.Value))
                     {
                         string key = child.Value != null ? child.Value.Trim() : "";
                         if (seenDirectives.Contains(key))
@@ -2742,10 +3140,20 @@ namespace AHK2AST.Plugins
                 var newStmts = new List<AstNode>();
                 foreach (var child in node.ChildNodes)
                 {
-                    if (child != null && child.NodeType != "Omitted")
+                    if (child == null || child.NodeType == "Omitted") continue;
+                    // A bare block (typically a pruned branch's body) is spliced in: blocks have no scope in AHK, and
+                    // `{` on the line after `Name(...)` would turn that call into a function definition.
+                    if (child.NodeType == "Block" && node.NodeType != "Class")
                     {
-                        newStmts.Add(child);
+                        foreach (var inner in child.ChildNodes)
+                            if (inner != null && inner.NodeType != "Omitted") newStmts.Add(inner);
+                        continue;
                     }
+                    newStmts.Add(child);
+                }
+                if (Config.PruneDeadBranches && node.NodeType == "Block")
+                {
+                    newStmts = DropUnreachable(newStmts);
                 }
                 if (Config.FoldConsecutiveStringAssigns)
                 {
@@ -2757,10 +3165,10 @@ namespace AHK2AST.Plugins
             if (Config.PruneDeadBranches && node.NodeType == "If")
             {
                 var condNode = node.ChildCount > 0 ? node.GetChild(0) : null;
-                object condVal = GetConstantValue(condNode);
-                if (condVal != null)
+                bool? condTruth = ConditionTruth(condNode);
+                if (condTruth != null)
                 {
-                    bool isTrue = IsTruthy(condVal);
+                    bool isTrue = condTruth.Value;
                     _prunedDeadBranchesCount++;
                     if (isTrue)
                     {
@@ -2794,7 +3202,10 @@ namespace AHK2AST.Plugins
                     {
                         if (op == "=" || op == "==" || op == "!=" || op == "!==" || op == "<>")
                         {
-                            bool hasLineFile = IsIdentifier(left, "A_LineFile") || IsIdentifier(right, "A_LineFile");
+                            bool hasLineFile = IsIdentifier(left, "A_LineFile") || IsIdentifier(right, "A_LineFile")
+                                // an inlined file's A_LineFile is pinned to its path (a string) by the include inliner
+                                || (left.NodeType == "String" && IsIdentifier(right, "A_ScriptFullPath"))
+                                || (right.NodeType == "String" && IsIdentifier(left, "A_ScriptFullPath"));
                             bool hasScriptPath = IsIdentifier(left, "A_ScriptFullPath") || IsIdentifier(right, "A_ScriptFullPath");
                             if (hasLineFile && hasScriptPath)
                             {
@@ -2810,102 +3221,46 @@ namespace AHK2AST.Plugins
                     object lVal = GetConstantValue(left);
                     object rVal = GetConstantValue(right);
 
-                    if (Config.FoldMathConstants && lVal is double && rVal is double && IsMathOp(op))
+                    if (Config.FoldMathConstants && IsMathOp(op))
                     {
-                        double l = (double)lVal;
-                        double r = (double)rVal;
-                        double res = 0;
-                        bool ok = false;
-                        switch (op)
-                        {
-                            case "+": res = l + r; ok = true; break;
-                            case "-": res = l - r; ok = true; break;
-                            case "*": res = l * r; ok = true; break;
-                            case "/": if (r != 0) { res = l / r; ok = true; } break;
-                            case "//": if (r != 0) { res = Math.Floor(l / r); ok = true; } break;
-                            case "**": res = Math.Pow(l, r); ok = true; break;
-                        }
-                        if (ok)
+                        var folded = CreateConstantNode(AhkConst.Arith(op, lVal, rVal), node.Line, node.Column);
+                        if (folded != null)
                         {
                             _foldedMathCount++;
-                            return CreateConstantNode(res, node.Line, node.Column);
+                            return folded;
                         }
                     }
 
-                    if (Config.FoldLogicalConstants && IsLogicalOp(op))
+                    // `a || b` / `a && b` yield an operand's value, so only a constant left side decides the result.
+                    if (Config.FoldLogicalConstants && IsLogicalOp(op) && lVal != null)
                     {
-                        if (op == "||" || op == "or")
+                        bool? lt = AhkConst.Truthy(lVal);
+                        if (lt != null)
                         {
-                            if (lVal != null && IsTruthy(lVal))
-                            {
-                                _foldedLogicalCount++;
-                                return left;
-                            }
-                            if (rVal != null && IsTruthy(rVal) && !HasSideEffects(left))
-                            {
-                                _foldedLogicalCount++;
-                                return right;
-                            }
-                            if (lVal != null && !IsTruthy(lVal))
-                            {
-                                _foldedLogicalCount++;
-                                return right;
-                            }
-                            if (rVal != null && !IsTruthy(rVal) && !HasSideEffects(left))
-                            {
-                                _foldedLogicalCount++;
-                                return left;
-                            }
-                        }
-                        if (op == "&&" || op == "and")
-                        {
-                            if (lVal != null && !IsTruthy(lVal))
-                            {
-                                _foldedLogicalCount++;
-                                return left;
-                            }
-                            if (rVal != null && !IsTruthy(rVal) && !HasSideEffects(left))
-                            {
-                                _foldedLogicalCount++;
-                                return right;
-                            }
-                            if (lVal != null && IsTruthy(lVal))
-                            {
-                                _foldedLogicalCount++;
-                                return right;
-                            }
-                            if (rVal != null && IsTruthy(rVal) && !HasSideEffects(left))
-                            {
-                                _foldedLogicalCount++;
-                                return left;
-                            }
-                        }
-                    }
-
-                    if (Config.FoldLogicalConstants && (op == "==" || op == "=" || op == "!="))
-                    {
-                        if (lVal is bool && rVal is bool)
-                        {
-                            bool lb = (bool)lVal;
-                            bool rb = (bool)rVal;
-                            bool res = (op == "!=") ? (lb != rb) : (lb == rb);
                             _foldedLogicalCount++;
-                            return CreateConstantNode(res, node.Line, node.Column);
-                        }
-                        if (lVal is string && rVal is string)
-                        {
-                            bool res = string.Equals((string)lVal, (string)rVal, StringComparison.OrdinalIgnoreCase);
-                            if (op == "!=") res = !res;
-                            _foldedLogicalCount++;
-                            return CreateConstantNode(res, node.Line, node.Column);
+                            bool isOr = op == "||" || op.Equals("or", StringComparison.OrdinalIgnoreCase);
+                            return isOr ? (lt.Value ? left : right) : (lt.Value ? right : left);
                         }
                     }
 
-                    if (Config.FoldStringConcats && op == "." && lVal != null && rVal != null)
+                    if (Config.FoldLogicalConstants && (op == "==" || op == "=" || op == "!=" || op == "!==" || op == "<>"))
                     {
-                        _foldedStringCount++;
-                        string folded = Convert.ToString(lVal, CultureInfo.InvariantCulture) + Convert.ToString(rVal, CultureInfo.InvariantCulture);
-                        return CreateConstantNode(folded, node.Line, node.Column);
+                        bool? cmp = lVal != null && rVal != null ? AhkConst.Compare(op, lVal, rVal) : null;
+                        if (cmp != null)
+                        {
+                            _foldedLogicalCount++;
+                            return CreateConstantNode(cmp.Value, node.Line, node.Column);
+                        }
+                    }
+
+                    if (Config.FoldStringConcats && op == ".")
+                    {
+                        string ls = AhkConst.ToText(lVal), rs = AhkConst.ToText(rVal);
+                        if (ls != null && rs != null)
+                        {
+                            _foldedStringCount++;
+                            return CreateConstantNode(ls + rs, node.Line, node.Column);
+                        }
                     }
                 }
             }
@@ -2916,10 +3271,10 @@ namespace AHK2AST.Plugins
                 var parts = new List<string>();
                 for (int k = 0; k < node.ChildCount; k++)
                 {
-                    object val = GetConstantValue(node.GetChild(k));
-                    if (val != null)
+                    string text = AhkConst.ToText(GetConstantValue(node.GetChild(k)));
+                    if (text != null)
                     {
-                        parts.Add(Convert.ToString(val, CultureInfo.InvariantCulture));
+                        parts.Add(text);
                     }
                     else
                     {
@@ -2935,20 +3290,16 @@ namespace AHK2AST.Plugins
                 }
             }
 
-            if (Config.FoldLogicalConstants && (node.NodeType == "LogicalNot" || (node.NodeType == "UnaryExpr" && node.Value == "!")))
+            if (Config.FoldLogicalConstants && (node.NodeType == "LogicalNot" || (node.NodeType == "UnaryExpr" && (node.Value == "!" || string.Equals(node.Value, "not", StringComparison.OrdinalIgnoreCase)))))
             {
                 var operand = node.ChildCount > 0 ? node.GetChild(0) : null;
-                if (operand != null)
+                bool? truth = operand != null ? AhkConst.Truthy(GetConstantValue(operand)) : null;
+                if (truth != null)
                 {
-                    object val = GetConstantValue(operand);
-                    if (val != null)
-                    {
-                        _foldedLogicalCount++;
-                        return CreateConstantNode(!IsTruthy(val), node.Line, node.Column);
-                    }
+                    _foldedLogicalCount++;
+                    return CreateConstantNode(!truth.Value, node.Line, node.Column);
                 }
             }
-
             if (node.NodeType == "Grouped")
             {
                 var inner = node.ChildCount > 0 ? node.GetChild(0) : null;
@@ -2997,6 +3348,40 @@ namespace AHK2AST.Plugins
             }
 
             return node;
+        }
+
+        /// <summary>
+        /// Statements after an unconditional `return` / `throw` in a block never run (typically left by a folded
+        /// `if !A_IsCompiled return`). They are dropped up to the next label (a goto target); definitions and
+        /// declarations are kept.
+        /// </summary>
+        private static bool ContainsNodeType(AstNode n, string type)
+        {
+            if (n == null) return false;
+            if (n.NodeType == type) return true;
+            foreach (var c in n.ChildNodes)
+                if (ContainsNodeType(c, type)) return true;
+            return false;
+        }
+
+        private List<AstNode> DropUnreachable(List<AstNode> stmts)
+        {
+            var result = new List<AstNode>();
+            bool dead = false;
+            foreach (var s in stmts)
+            {
+                string t = s.NodeType;
+                if (t == "Label" || (dead && ContainsNodeType(s, "Label"))) dead = false;
+                if (dead && t != "Method" && t != "Class" && t != "Comment" && t != "Declaration" && t != "StaticAssign"
+                    && t != "Hotkey" && t != "Hotstring" && t != "Directive" && t != "Include")
+                {
+                    _prunedDeadBranchesCount++;
+                    continue;
+                }
+                result.Add(s);
+                if (t == "Return" || t == "Throw") dead = true;
+            }
+            return result;
         }
 
         private bool IsMathOp(string op)

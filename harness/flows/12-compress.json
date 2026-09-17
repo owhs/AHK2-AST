@@ -1,0 +1,34 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ],
+    "Compatibility": "entry,best-effort",
+    "Renames": true
+  },
+  "Meta": {
+    "Name": "User flow: Optimise && Minify (build\\Flows\\optimise.json)",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Optimise",
+      "Icon": "⚡",
+      "ConfigType": "AHK2AST.Plugins.OptimiseConfig",
+      "ConfigJson": "{\"RemoveDuplicateDirectives\":true,\"ConvertIfToSwitch\":true,\"FoldMathConstants\":true,\"FoldLogicalConstants\":true,\"PruneDeadBranches\":true,\"FoldStringConcats\":true,\"FoldConsecutiveStringAssigns\":true,\"BuildStateOptimize\":0,\"StripComments\":true,\"PatchIncludeSelfExecution\":true}"
+    },
+    {
+      "Title": "Tree-shake",
+      "Icon": "🌳",
+      "ConfigType": "AHK2AST.Plugins.TreeShakerConfig",
+      "ConfigJson": "{\"Profile\":3,\"TraceStringReferences\":true,\"ShakeMainFileDeclarations\":true,\"ShakeLibraryDeclarations\":true,\"ShakeUnusedMethods\":true,\"ShakeDeadBranches\":true,\"OptimizeEmptyBlocks\":true,\"ShakeUnusedGlobals\":true,\"ShakeUnusedAssignments\":true,\"FoldConstantExpressions\":true}"
+    },
+    {
+      "Title": "Minify",
+      "Icon": "🤐",
+      "ConfigType": "AHK2AST.Plugins.MinifyConfig",
+      "ConfigJson": "{\"InlineSingleUseVariables\":true,\"EscapeMultilineStrings\":true,\"FoldConstants\":true,\"RenameLocalVariables\":true,\"RenameGlobalVariables\":true,\"RenameFunctions\":true,\"RenameClasses\":true,\"RenameProperties\":true,\"RenamePropertyStringLiterals\":true,\"ExcludeProperties\":\"\",\"TryRiskyRenames\":false,\"AggressiveOneLining\":false}"
+    }
+  ]
+}

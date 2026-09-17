@@ -89,7 +89,7 @@ public class AhkAstEngine
         {
             _lexer = new AhkLexer(source);
             List<Token> tokens = _lexer.Tokenize();
-            _parser = new AhkParser(tokens, _grammar);
+            _parser = new AhkParser(tokens, _grammar) { LineMap = _lexer.LineMap };
             return ExecutePlugins(_parser.ParseProgram());
         }
         catch (Exception ex)
@@ -148,16 +148,15 @@ public class AhkAstEngine
         {
             PipelineLogger.Log("Parsing source code...");
             var parseSw = System.Diagnostics.Stopwatch.StartNew();
-            root = Parse(source);
+            using (Prof.Time("flow.parse")) root = Parse(source);
             if (followIncludes && !string.IsNullOrEmpty(currentFilePath))
             {
                 var activeStack = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var allIncluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                activeStack.Add(Path.GetFileName(currentFilePath));
-                activeStack.Add(currentFilePath);
-                allIncluded.Add(Path.GetFileName(currentFilePath));
-                allIncluded.Add(currentFilePath);
-                ProcessIncludes(root, Path.GetDirectoryName(currentFilePath), activeStack, allIncluded, false);
+                string mainPath = FullPathOrSelf(currentFilePath); // files are told apart by full path, as AutoHotkey does
+                activeStack.Add(mainPath);
+                allIncluded.Add(mainPath);
+                using (Prof.Time("flow.includes")) ProcessIncludes(root, Path.GetDirectoryName(currentFilePath), activeStack, allIncluded, false);
             }
             parseSw.Stop();
             PipelineLogger.Log("Parsing complete in {0}ms.", parseSw.ElapsedMilliseconds);
@@ -446,7 +445,8 @@ public class AhkAstEngine
         }
 
         PipelineLogger.Log("Running pipeline...");
-        var results = localPluginManager.RunPipeline(root);
+        List<PipelineStepResult> results;
+        using (Prof.Time("flow.pipeline")) results = localPluginManager.RunPipeline(root);
         PipelineLogger.Log("Finished pipeline execution.");
 
         string finalEmitted = "";
@@ -455,11 +455,11 @@ public class AhkAstEngine
         {
             var lastResult = results[results.Count - 1].Output;
             if (lastResult is string) finalEmitted = (string)lastResult;
-            else if (lastResult is AstNode) finalEmitted = Emit((AstNode)lastResult, emitOpts);
+            else if (lastResult is AstNode) using (Prof.Time("flow.emit")) finalEmitted = Emit((AstNode)lastResult, emitOpts);
         }
         else
         {
-            finalEmitted = Emit(root, emitOpts);
+            using (Prof.Time("flow.emit")) finalEmitted = Emit(root, emitOpts);
         }
 
         totalSw.Stop();
@@ -672,6 +672,28 @@ public class AhkAstEngine
 
     // -- #Include Following ------------------------------------------------
 
+    /// <summary>Parse source string and follow #Include directives recursively relative to currentFilePath.</summary>
+    public AstNode ParseSourceWithIncludes(string source, string currentFilePath, bool throwOnMissing)
+    {
+        if (string.IsNullOrEmpty(currentFilePath))
+        {
+            return Parse(source);
+        }
+        string fullPath = Path.GetFullPath(currentFilePath);
+        string mainScriptDir = Path.GetDirectoryName(fullPath);
+        var activeStack = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var allIncluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        activeStack.Add(fullPath);
+        allIncluded.Add(fullPath);
+
+        AstNode ast = Parse(source);
+
+        string fileDir = Path.GetDirectoryName(fullPath);
+        ProcessIncludes(ast, fileDir, activeStack, allIncluded, throwOnMissing, mainScriptDir);
+
+        return ast;
+    }
+
     /// <summary>Parse a file and follow #Include directives recursively.</summary>
     public AstNode ParseFileWithIncludes(string path, bool throwOnMissing)
     {
@@ -688,10 +710,11 @@ public class AhkAstEngine
         {
             mainScriptDir = Path.GetDirectoryName(fullPath);
         }
-        string fileName = Path.GetFileName(fullPath);
-        if (allIncluded.Contains(fileName) || allIncluded.Contains(fullPath))
+        // AutoHotkey includes a file once per full path: two different JSON.ahk files are two files.
+        fullPath = FullPathOrSelf(fullPath);
+        if (allIncluded.Contains(fullPath))
         {
-            if (activeStack.Contains(fileName) || activeStack.Contains(fullPath))
+            if (activeStack.Contains(fullPath))
             {
                 var prog = new AstNode("Program", 0, 0);
                 prog.AddChild(new AstNode("Warning", 0, 0) { Value = "Circular include: " + fullPath });
@@ -715,15 +738,13 @@ public class AhkAstEngine
             return prog;
         }
 
-        activeStack.Add(fileName);
         activeStack.Add(fullPath);
-        allIncluded.Add(fileName);
         allIncluded.Add(fullPath);
         try
         {
             AstNode ast = AstFileCache.GetOrAdd(fullPath, (path) =>
             {
-                return Parse(File.ReadAllText(path, Encoding.UTF8));
+                using (Prof.Time("include.parse")) return Parse(File.ReadAllText(path, Encoding.UTF8));
             });
 
             // Process #Include directives
@@ -734,9 +755,13 @@ public class AhkAstEngine
         }
         finally
         {
-            activeStack.Remove(fileName);
             activeStack.Remove(fullPath);
         }
+    }
+
+    private static string FullPathOrSelf(string path)
+    {
+        try { return Path.GetFullPath(path); } catch { return path; }
     }
 
     private void ProcessIncludes(AstNode node, string baseDir, HashSet<string> activeStack, HashSet<string> allIncluded, bool throwOnMissing, string mainScriptDir = null)
@@ -746,10 +771,26 @@ public class AhkAstEngine
             mainScriptDir = baseDir;
         }
         string includeDir = baseDir;
+        ProcessIncludesIn(node, baseDir, ref includeDir, activeStack, allIncluded, throwOnMissing, mainScriptDir);
+    }
+
+    /// <summary>
+    /// #Include is a load-time directive: AutoHotkey applies it wherever it appears, including inside blocks
+    /// (`if (dev) { #Include gen.ahk }`), so every level is walked in document order. `#Include dir\` changes the
+    /// include directory for everything after it, block or not, hence the shared ref.
+    /// </summary>
+    private void ProcessIncludesIn(AstNode node, string baseDir, ref string includeDir, HashSet<string> activeStack, HashSet<string> allIncluded, bool throwOnMissing, string mainScriptDir)
+    {
         for (int i = 0; i < node.ChildCount; i++)
         {
             AstNode child = node.GetChild(i);
-            if (child.NodeType != "Directive") continue;
+            if (child == null) continue;
+            if (child.NodeType != "Directive")
+            {
+                if (child.NodeType != "Include" && child.ChildCount > 0)
+                    ProcessIncludesIn(child, baseDir, ref includeDir, activeStack, allIncluded, throwOnMissing, mainScriptDir);
+                continue;
+            }
 
             string val = child.Value;
             if (val == null) continue;
@@ -782,6 +823,9 @@ public class AhkAstEngine
             if (rest.Length > 2 && ((rest[0] == '\'' && rest[rest.Length - 1] == '\'')
                 || (rest[0] == '"' && rest[rest.Length - 1] == '"')))
                 rest = rest.Substring(1, rest.Length - 2).Trim();
+
+            // 5. Built-in variables AHK expands in #Include paths (%A_ScriptDir%\lib\x.ahk, %A_LineFile%\..\x.ahk, ...)
+            if (rest.IndexOf('%') >= 0) rest = ExpandIncludeVariables(rest, mainScriptDir, baseDir);
 
             bool isLibInclude = false;
             string libName = "";
@@ -888,6 +932,7 @@ public class AhkAstEngine
                     }
                     var errNode = new AstNode("Error", child.Line, child.Column);
                     errNode.Value = "Library include not found: <" + libName + ">";
+                    errNode.CopyRangeFrom(child);
                     node.ReplaceChild(i, errNode);
                     continue;
                 }
@@ -912,6 +957,8 @@ public class AhkAstEngine
                 AstNode includeAst = ParseFileRecursive(filePath, activeStack, allIncluded, !optional && throwOnMissing, mainScriptDir);
                 var includeNode = new AstNode("Include", child.Line, child.Column);
                 includeNode.Value = filePath;
+                includeNode.CopyRangeFrom(child); // the #Include line in this file (its children are in filePath)
+                includeNode.ChildFile = filePath;
                 if (includeAst.Metadata == "duplicate")
                 {
                     includeNode.Metadata = "; duplicate include: " + filePath;
@@ -919,6 +966,7 @@ public class AhkAstEngine
                 else
                 {
                     includeNode.Metadata = child.Value; // original directive text
+                    if (AstFileCache.MentionsLineFile(filePath)) using (Prof.Time("include.pin")) PinLineFile(includeAst, filePath);
                     foreach (var ic in includeAst.ChildNodes)
                     {
                         includeNode.AddChild(ic);
@@ -926,7 +974,7 @@ public class AhkAstEngine
                 }
                 // Tag errors/warnings with source file for better diagnostics
                 string shortName = Path.GetFileName(filePath);
-                TagIncludeErrors(includeNode, shortName);
+                using (Prof.Time("include.tag")) TagIncludeErrors(includeNode, shortName);
                 node.ReplaceChild(i, includeNode);
             }
             catch (Exception ex)
@@ -934,9 +982,69 @@ public class AhkAstEngine
                 if (!optional && throwOnMissing) throw;
                 var errNode = new AstNode("Error", child.Line, child.Column);
                 errNode.Value = "Include failed: " + filePath + " \u2014 " + ex.Message;
+                errNode.CopyRangeFrom(child);
                 node.ReplaceChild(i, errNode);
             }
         }
+    }
+
+    /// <summary>
+    /// Inlined, a file's code no longer runs in that file: A_LineFile would become the output's path. Libraries use it
+    /// to find their resources (`static LibDir := SubStr(A_LineFile, ...)`) and in self-run guards, so every read of
+    /// A_LineFile in the file's own code is replaced by the file's original path (what it evaluated to). Nested
+    /// Include nodes were already pinned to their own files.
+    /// </summary>
+    private static void PinLineFile(AstNode node, string filePath)
+    {
+        if (node == null || string.IsNullOrEmpty(filePath)) return;
+        string literal = "\"" + filePath.Replace("`", "``") + "\"";
+        for (int i = 0; i < node.ChildCount; i++)
+        {
+            var c = node.GetChild(i);
+            if (c == null || c.NodeType == "Include") continue;
+            if (c.NodeType == "Identifier" && string.Equals(c.Value, "A_LineFile", StringComparison.OrdinalIgnoreCase))
+            {
+                node.ReplaceChild(i, new AstNode("String", c.Line, c.Column) { Value = literal });
+                continue;
+            }
+            PinLineFile(c, filePath);
+        }
+    }
+
+    /// <summary>
+    /// Expands the built-in variables AutoHotkey allows in #Include paths. A_LineFile is the including file; only its
+    /// folder is known here, which is what the usual `%A_LineFile%\..\x.ahk` form needs. Unknown names are left as-is.
+    /// </summary>
+    private static string ExpandIncludeVariables(string path, string scriptDir, string currentDir)
+    {
+        return Regex.Replace(path, @"%(A_\w+)%", m =>
+        {
+            switch (m.Groups[1].Value.ToLowerInvariant())
+            {
+                case "a_scriptdir": return scriptDir ?? m.Value;
+                case "a_linefile": return currentDir != null ? Path.Combine(currentDir, "~linefile.ahk") : m.Value;
+                case "a_appdata": return Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                case "a_appdatacommon": return Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                case "a_mydocuments": return Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                case "a_desktop": return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                case "a_desktopcommon": return Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+                case "a_programfiles": return Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                case "a_programs": return Environment.GetFolderPath(Environment.SpecialFolder.Programs);
+                case "a_programscommon": return Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms);
+                case "a_startmenu": return Environment.GetFolderPath(Environment.SpecialFolder.StartMenu);
+                case "a_startmenucommon": return Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu);
+                case "a_startup": return Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+                case "a_startupcommon": return Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup);
+                case "a_temp": return Path.GetTempPath().TrimEnd('\\');
+                case "a_windir": return Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                case "a_computername": return Environment.MachineName;
+                case "a_username": return Environment.UserName;
+                case "a_comspec": return Environment.GetEnvironmentVariable("ComSpec") ?? m.Value;
+                case "a_space": return " ";
+                case "a_tab": return "\t";
+                default: return m.Value;
+            }
+        });
     }
 
     /// <summary>Tag Error/Warning nodes inside an include with the source filename.</summary>
@@ -1078,6 +1186,29 @@ public static class AstFileCache
         }
     }
 
+    // Whether a file's text mentions A_LineFile at all (most don't: then there is nothing to pin), by path + write time.
+    private static readonly Dictionary<string, Tuple<DateTime, bool>> LineFileMention = new Dictionary<string, Tuple<DateTime, bool>>(StringComparer.OrdinalIgnoreCase);
+    // outside #directives (#Include %A_LineFile%\.. is resolved already)
+    private static readonly System.Text.RegularExpressions.Regex LineFileRef = new System.Text.RegularExpressions.Regex(@"^(?!\s*#).*\bA_LineFile\b",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline);
+
+    public static bool MentionsLineFile(string path)
+    {
+        try
+        {
+            string fullPath = Path.GetFullPath(path);
+            DateTime t = File.GetLastWriteTimeUtc(fullPath);
+            lock (LineFileMention)
+            {
+                Tuple<DateTime, bool> m;
+                if (LineFileMention.TryGetValue(fullPath, out m) && m.Item1 == t) return m.Item2;
+            }
+            bool mentions = LineFileRef.IsMatch(File.ReadAllText(fullPath)); // outside #directives (#Include %A_LineFile%\.. is resolved already)
+            lock (LineFileMention) LineFileMention[fullPath] = Tuple.Create(t, mentions);
+            return mentions;
+        }
+        catch { return true; }
+    }
     public static AstNode GetOrAdd(string path, Func<string, AstNode> parseFunc)
     {
         string fullPath = Path.GetFullPath(path);
@@ -1095,7 +1226,7 @@ public static class AstFileCache
             {
                 if (cached.Item1 == currentWriteTime)
                 {
-                    return cached.Item2.Clone();
+                    using (Prof.Time("include.clone")) return cached.Item2.Clone();
                 }
             }
         }

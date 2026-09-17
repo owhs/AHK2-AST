@@ -1,417 +1,206 @@
-// AHK# AST Workbench — Comprehensive Parser, Analyzer & Test Runner
-// A premium WinForms GUI for parsing, inspecting, debugging, and running AHK2 scripts.
-// Compiled into ahk#.bridge.dll alongside AhkAstEngine.cs.
+// Running and validating with AutoHotkey. A saved, unmodified script runs as itself; edited text and flow
+// output run from a hidden temp file in the script's folder (so A_ScriptDir and relative paths still work).
+// Stop only ever ends the process the workbench started.
 
 using System;
-using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
-using WeifenLuo.WinFormsUI.Docking;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// COM-Visible Entry Point
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Main Form
-// ═══════════════════════════════════════════════════════════════════════════════
-
-internal partial class AstWorkbenchForm : Form
+internal partial class AstWorkbenchForm
 {
-    // ── Test Runner ───────────────────────────────────────────────────────
+    private Process _runProcess;
+    private string _runTemp;
 
-    private void TestRun()
+    bool IsRunning { get { try { return _runProcess != null && !_runProcess.HasExited; } catch { return false; } } }
+
+    string Ahk()
     {
-        var activeDoc = _dockPanel.ActiveDocument;
-        if (activeDoc == _sourceContent)
+        string p = AhkRuntime.Find(_state.AhkPath);
+        if (p == null)
         {
-            // if on source editor, and do f5/run... emit it, and run the emitted code
-            string oldText = _emitSourceEditor.Text;
-            _emitSourceEditor.Text = "";
-            EmitFromAst();
-            if (!string.IsNullOrEmpty(_emitSourceEditor.Text))
-            {
-                RunAhkScript(_emitSourceEditor.Text);
-            }
-            else
-            {
-                _emitSourceEditor.Text = oldText;
-            }
+            var r = MessageBox.Show(this, "AutoHotkey v2 was not found. Choose AutoHotkey64.exe (or AutoHotkey.exe) now?", "AutoHotkey", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (r == DialogResult.Yes && PickAhkPath()) p = _state.AhkPath;
         }
-        else if (activeDoc is PipelineBuilderContent)
+        return p;
+    }
+
+    bool PickAhkPath()
+    {
+        using (var dlg = new OpenFileDialog { Filter = "AutoHotkey (*.exe)|*.exe", Title = "Choose the AutoHotkey v2 executable" })
         {
-            // if i am in a flow editor and do run, run it and run the emitted code
-            var pb = (PipelineBuilderContent)activeDoc;
-            bool hasDiagram = false;
-            foreach (Control c in pb.VisualInspector.Controls)
-            {
-                if (c is StepCardControl && ((StepCardControl)c).Title == "Logic Flow Diagram")
-                {
-                    hasDiagram = true;
-                    break;
-                }
-            }
-            pb.ExecuteFlow(!hasDiagram);
-        }
-        else if (activeDoc == _emitSourceContent)
-        {
-            // if i am in an emitted code and run, just run it
-            RunAhkScript(_emitSourceEditor.Text);
-        }
-        else
-        {
-            // Default fallback: run the main source editor
-            RunAhkScript(_sourceEditor.Text);
+            string cur = AhkRuntime.Find(_state.AhkPath);
+            if (cur != null) dlg.InitialDirectory = Path.GetDirectoryName(cur);
+            if (dlg.ShowDialog(this) != DialogResult.OK) return false;
+            _state.AhkPath = dlg.FileName;
+            _state.Save();
+            Status("AutoHotkey: " + dlg.FileName, WbTheme.Green);
+            return true;
         }
     }
 
-    private void RunAhkScript(string source)
+    void RunActive()
     {
-        StopRun(); // Kill any existing process
-
-        if (source == null)
+        var t = AnalysisTarget;
+        if (t == null) return;
+        if (t.IsUntitled || t.IsDirty)
         {
-            _statusLabel.Text = "Nothing to run";
+            var r = t.IsUntitled ? DialogResult.No : MessageBox.Show(this, t.DisplayName + " has unsaved changes.\n\nYes: save, then run the file.\nNo: run the edited text without saving.",
+                "Run", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (r == DialogResult.Cancel) return;
+            if (r == DialogResult.Yes) { if (!t.Save()) return; }
+            else { RunScriptText(t.GetText(), t.IsUntitled ? null : Path.GetDirectoryName(t.FilePath), t.DisplayName + " (unsaved)"); return; }
+        }
+        StartRun(t.FilePath, Path.GetDirectoryName(t.FilePath), t.DisplayName, null);
+    }
+
+    public void RunScriptText(string text, string dir, string title)
+    {
+        string kind = OutputDocument.DetectKind(text);
+        if (kind == "html" || kind == "markdown" || kind == "json")
+        {
+            string ext = kind == "html" ? ".html" : kind == "json" ? ".json" : ".md";
+            string p = Path.Combine(Path.GetTempPath(), "ahk2ast_" + DateTime.Now.Ticks + ext);
+            File.WriteAllText(p, text, new UTF8Encoding(false));
+            try { Process.Start(new ProcessStartInfo { FileName = p, UseShellExecute = true }); Status("Opened " + title + " in the default app", WbTheme.Sky); }
+            catch (Exception ex) { Status("Could not open: " + ex.Message, WbTheme.Red); }
             return;
         }
-
-        string trimmed = source.TrimStart();
-        string firstLine = GetCleanFirstNonCommentLine(source);
-        bool isHtml = firstLine.StartsWith("<html", StringComparison.OrdinalIgnoreCase) || 
-                      firstLine.StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase) ||
-                      firstLine.StartsWith("<div", StringComparison.OrdinalIgnoreCase) ||
-                      firstLine.StartsWith("<svg", StringComparison.OrdinalIgnoreCase);
-        
-        bool isMd = firstLine.StartsWith("# ") || 
-                    firstLine.StartsWith("## ") || 
-                    firstLine.StartsWith("### ") ||
-                    firstLine.StartsWith("```") ||
-                    trimmed.Contains("```mermaid") ||
-                    trimmed.Contains("```\n") ||
-                    trimmed.Contains("```\r\n");
-
-        bool isJson = (firstLine.StartsWith("[") || firstLine.StartsWith("{")) && 
-                      (firstLine.Contains("\":") || firstLine.Contains("\" :") || source.Contains("\":") || source.Contains("\" :"));
-
-        if (isHtml)
+        if (kind == "nim")
         {
-            _statusLabel.Text = "HTML report detected. Opening in browser...";
-            _statusLabel.ForeColor = WbTheme.Sky;
-            try
-            {
-                string tempHtml = Path.Combine(Path.GetTempPath(), "ahk2ast_report_" + DateTime.Now.Ticks + ".html");
-                File.WriteAllText(tempHtml, source, Encoding.UTF8);
-                Process.Start(new ProcessStartInfo { FileName = tempHtml, UseShellExecute = true });
-            }
-            catch (Exception ex)
-            {
-                _statusLabel.Text = "Failed to open HTML: " + ex.Message;
-                _statusLabel.ForeColor = WbTheme.Red;
-            }
+            if (!HasNimPlugin) { Status("This build has no Nim transpiler plugin", WbTheme.Yellow); return; }
+            OpenNimBuildManager().TriggerBuildFromTranspiler(text);
             return;
         }
+        string temp;
+        try { temp = AhkRuntime.TempScript(dir, text); }
+        catch (Exception ex) { Status("Could not write the temp script: " + ex.Message, WbTheme.Red); return; }
+        StartRun(temp, Path.GetDirectoryName(temp), title, temp);
+    }
 
-        if (isMd)
-        {
-            _statusLabel.Text = "Markdown report detected.";
-            _statusLabel.ForeColor = WbTheme.Sky;
-            return;
-        }
+    void StartRun(string script, string workDir, string title, string tempToDelete)
+    {
+        string ahk = Ahk();
+        if (ahk == null) { if (tempToDelete != null) TryDelete(tempToDelete); return; }
+        if (IsRunning) StopRun(false);
 
-        if (isJson)
-        {
-            _statusLabel.Text = "JSON data detected.";
-            _statusLabel.ForeColor = WbTheme.Sky;
-            return;
-        }
-
-        bool hasNim = AHK2AST.Plugins.PluginRegistry.RegisteredPluginTypes.Any(t => t.Name == "NimTranspilerPlugin" || t.FullName == "AHK2AST.Plugins.NimTranspilerPlugin");
-
-        // Check if the source code is transpiled Nim code
-        if (hasNim && (source.Contains("import AhkStdLib") || source.StartsWith("# --- DllCall Bindings ---") || source.StartsWith("import std/")))
-        {
-            _statusLabel.Text = "Transpiled Nim detected. Directing to Nim Build Manager...";
-            _statusLabel.ForeColor = WbTheme.Sky;
-            
-            OpenNimBuildManager();
-            
-            foreach (var doc in _dockPanel.Documents)
-            {
-                var buildDoc = doc as NimBuildContent;
-                if (buildDoc != null)
-                {
-                    buildDoc.TriggerBuildFromTranspiler(source);
-                    return;
-                }
-            }
-            return;
-        }
-
-        // Determine AHK path
-        string ahkPath = FindAhkPath();
-        if (string.IsNullOrEmpty(ahkPath))
-        {
-            _statusLabel.Text = "[X] AutoHotkey.exe not found -- set path via Run menu";
-            _statusLabel.ForeColor = WbTheme.Red;
-            return;
-        }
-
-        // Determine temp script path
-        string scriptPath;
-        if (!string.IsNullOrEmpty(_tempPathBox.Text))
-        {
-            scriptPath = _tempPathBox.Text;
-        }
-        else if (!string.IsNullOrEmpty(_currentFile))
-        {
-            // Use a temp file alongside the current file
-            scriptPath = Path.Combine(
-                Path.GetDirectoryName(_currentFile),
-                "__ast_workbench_temp.ahk");
-        }
-        else
-        {
-            scriptPath = Path.Combine(Path.GetTempPath(), "__ast_workbench_temp.ahk");
-        }
-
-        // Determine working directory
-        string workDir = _runDirBox.Text;
-        if (string.IsNullOrEmpty(workDir) || !Directory.Exists(workDir))
-        {
-            workDir = !string.IsNullOrEmpty(_currentFile)
-                ? Path.GetDirectoryName(_currentFile)
-                : Path.GetDirectoryName(scriptPath);
-        }
-
-        // Write temp script
-        File.WriteAllText(scriptPath, source, Encoding.UTF8);
-
-        // Switch to Run Output tab
-        SelectTab(2);
-        _runOutput.Clear();
-        AppendLog(_runOutput, "═══ TEST RUN ═══", WbTheme.Lavender);
-        AppendLog(_runOutput, "  AHK:    " + ahkPath, WbTheme.Subtext0);
-        AppendLog(_runOutput, "  Script: " + scriptPath, WbTheme.Subtext0);
-        AppendLog(_runOutput, "  CWD:    " + workDir, WbTheme.Subtext0);
-        AppendLog(_runOutput, "────────────────────────────────────────", WbTheme.Overlay0);
-        AppendLog(_runOutput, "", WbTheme.Text);
-
+        ShowPanel(_console);
+        _console.Begin("Run: " + title);
+        _console.Write("▶ " + title, WbTheme.Lavender);
+        _console.Write("  " + ahk + "  " + (tempToDelete != null ? "(temp copy) " : "") + script, WbTheme.Overlay0);
         var sw = Stopwatch.StartNew();
-
         try
         {
-            var psi = new ProcessStartInfo
+            var p = new Process { StartInfo = AhkRuntime.StartInfo(ahk, script, workDir, false), EnableRaisingEvents = true };
+            p.OutputDataReceived += (s, e) => { if (e.Data != null) UI(() => _console.Write(e.Data, WbTheme.Text)); };
+            p.ErrorDataReceived += (s, e) => { if (e.Data != null) UI(() => _console.Write(tempToDelete != null ? e.Data.Replace(tempToDelete, title) : e.Data, WbTheme.Red)); };
+            p.Exited += (s, e) =>
             {
-                FileName = ahkPath,
-                Arguments = "\"" + scriptPath + "\"",
-                WorkingDirectory = workDir,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            _runProcess = new Process { StartInfo = psi, EnableRaisingEvents = true };
-
-            _runProcess.OutputDataReceived += (s, e) =>
-            {
-                if (e.Data != null)
-                    BeginInvoke((Action)(() => AppendLog(_runOutput, "  " + e.Data, WbTheme.Text)));
-            };
-
-            _runProcess.ErrorDataReceived += (s, e) =>
-            {
-                if (e.Data != null)
-                    BeginInvoke((Action)(() => AppendLog(_runOutput, "  ⚠ " + e.Data, WbTheme.Red)));
-            };
-
-            _runProcess.Exited += (s, e) =>
-            {
-                sw.Stop();
-                int exitCode = -1;
-                try { exitCode = _runProcess.ExitCode; } catch { }
-
-                BeginInvoke((Action)(() =>
+                int code = -1;
+                try { code = p.ExitCode; } catch { }
+                UI(() =>
                 {
-                    AppendLog(_runOutput, "", WbTheme.Text);
-                    AppendLog(_runOutput, "────────────────────────────────────────", WbTheme.Overlay0);
-
-                    if (exitCode == 0)
-                    {
-                        AppendLog(_runOutput, string.Format("  OK Exited ({0}) after {1:F1}s", exitCode, sw.ElapsedMilliseconds / 1000.0), WbTheme.Green);
-                        _statusLabel.Text = string.Format("OK Script exited ({0}) after {1:F1}s", exitCode, sw.ElapsedMilliseconds / 1000.0);
-                        _statusLabel.ForeColor = WbTheme.Green;
-                    }
-                    else
-                    {
-                        AppendLog(_runOutput, string.Format("  FAIL Exited ({0}) after {1:F1}s", exitCode, sw.ElapsedMilliseconds / 1000.0), WbTheme.Red);
-                        _statusLabel.Text = string.Format("FAIL Script exited ({0}) after {1:F1}s", exitCode, sw.ElapsedMilliseconds / 1000.0);
-                        _statusLabel.ForeColor = WbTheme.Red;
-                    }
-
-                    // Clean up temp file (only if it was auto-generated)
-                    if (string.IsNullOrEmpty(_tempPathBox.Text))
-                    {
-                        try { File.Delete(scriptPath); } catch { }
-                    }
-
-                    // Auto load trace
+                    _console.Write(string.Format("■ exited with code {0} after {1:0.0} s", code, sw.Elapsed.TotalSeconds), code == 0 ? WbTheme.Green : WbTheme.Red);
+                    Status(title + (code == 0 ? " finished" : " exited with code " + code), code == 0 ? WbTheme.Green : WbTheme.Red);
+                    if (tempToDelete != null) TryDelete(tempToDelete);
+                    if (_runProcess == p) { _runProcess = null; _runTemp = null; }
+                    UpdateToolbar();
                     AutoLoadTraceAfterRun(workDir);
-                }));
+                });
             };
-
-            _runProcess.Start();
-            _runProcess.BeginOutputReadLine();
-            _runProcess.BeginErrorReadLine();
-
-            _statusLabel.Text = "Running...";
-            _statusLabel.ForeColor = WbTheme.Sky;
+            p.Start();
+            p.BeginOutputReadLine();
+            p.BeginErrorReadLine();
+            _runProcess = p;
+            _runTemp = tempToDelete;
+            Status("Running " + title + "…  (Shift+F5 stops it)", WbTheme.Sky);
         }
         catch (Exception ex)
         {
-            AppendLog(_runOutput, "  [X] Failed to launch: " + ex.Message, WbTheme.Red);
-            _statusLabel.Text = "Run failed: " + ex.Message;
-            _statusLabel.ForeColor = WbTheme.Red;
+            _console.Write("Could not start AutoHotkey: " + ex.Message, WbTheme.Red);
+            if (tempToDelete != null) TryDelete(tempToDelete);
         }
+        UpdateToolbar();
     }
 
-    private void StopRun()
+    void StopRun(bool user)
     {
-        if (_runProcess != null && !_runProcess.HasExited)
+        var p = _runProcess;
+        if (p == null) return;
+        try
         {
+            if (!p.HasExited)
+            {
+                p.Kill(); // only the process this workbench started
+                if (user) { _console.Write("■ stopped", WbTheme.Yellow); Status("Stopped", WbTheme.Yellow); }
+            }
+        }
+        catch { }
+        if (_runTemp != null) { var t = _runTemp; ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(500); TryDelete(t); }); }
+        _runProcess = null;
+        _runTemp = null;
+        UpdateToolbar();
+    }
+
+    static void TryDelete(string path)
+    {
+        try { File.SetAttributes(path, FileAttributes.Normal); File.Delete(path); } catch { }
+    }
+
+    void UI(Action a)
+    {
+        try { if (!IsDisposed) BeginInvoke(a); } catch { }
+    }
+
+    // ── Validate ───────────────────────────────────────────────────────────────────────────────────────
+
+    void ValidateActive()
+    {
+        var t = AnalysisTarget;
+        if (t == null) return;
+        if (!t.IsUntitled && !t.IsDirty) Validate(t.FilePath, Path.GetDirectoryName(t.FilePath), t.DisplayName, null);
+        else ValidateText(t.GetText(), t.IsUntitled ? null : Path.GetDirectoryName(t.FilePath), t.DisplayName);
+    }
+
+    public void ValidateText(string text, string dir, string title)
+    {
+        string temp;
+        try { temp = AhkRuntime.TempScript(dir, text); }
+        catch (Exception ex) { Status("Could not write the temp script: " + ex.Message, WbTheme.Red); return; }
+        Validate(temp, Path.GetDirectoryName(temp), title, temp);
+    }
+
+    void Validate(string script, string workDir, string title, string temp)
+    {
+        string ahk = Ahk();
+        if (ahk == null) { if (temp != null) TryDelete(temp); return; }
+        Status("Validating " + title + " with AutoHotkey…", WbTheme.Sky);
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            string output = ""; int code = -1;
             try
             {
-                _runProcess.Kill();
-                AppendLog(_runOutput, "  [X] Process killed by user", WbTheme.Yellow);
-                _statusLabel.Text = "Process stopped";
-                _statusLabel.ForeColor = WbTheme.Yellow;
+                using (var p = Process.Start(AhkRuntime.StartInfo(ahk, script, workDir, true)))
+                {
+                    var err = p.StandardError.ReadToEndAsync();
+                    var outp = p.StandardOutput.ReadToEndAsync();
+                    if (!p.WaitForExit(20000)) { try { p.Kill(); } catch { } output = "AutoHotkey did not finish validating within 20 s."; }
+                    else { code = p.ExitCode; output = (err.Result + outp.Result).Trim(); }
+                }
             }
-            catch { }
-        }
-        _runProcess = null;
-    }
-
-    private string FindAhkPath()
-    {
-        // 1. User-configured path
-        if (_ahkPathBox != null && !string.IsNullOrEmpty(_ahkPathBox.Text) && File.Exists(_ahkPathBox.Text))
-            return _ahkPathBox.Text;
-
-        // 2. Common install locations
-        string[] candidates = {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "AutoHotkey", "v2", "AutoHotkey.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "AutoHotkey", "v2", "AutoHotkey64.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "AutoHotkey", "v2", "AutoHotkey32.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "AutoHotkey", "AutoHotkey.exe"),
-            @"C:\Program Files\AutoHotkey\v2\AutoHotkey.exe",
-            @"C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe",
-            @"C:\Program Files\AutoHotkey\AutoHotkey.exe"
-        };
-
-        foreach (string path in candidates)
-            if (File.Exists(path)) return path;
-
-        // 3. PATH lookup
-        string envPath = Environment.GetEnvironmentVariable("PATH") ?? "";
-        foreach (string dir in envPath.Split(';'))
-        {
-            string full = Path.Combine(dir.Trim(), "AutoHotkey.exe");
-            if (File.Exists(full)) return full;
-            full = Path.Combine(dir.Trim(), "AutoHotkey64.exe");
-            if (File.Exists(full)) return full;
-        }
-
-        return null;
-    }
-
-    // ── Config Dialogs ────────────────────────────────────────────────────
-
-    private void SetWorkingDir()
-    {
-        using (var dlg = new FolderBrowserDialog())
-        {
-            dlg.Description = "Select working directory for test runs";
-            if (!string.IsNullOrEmpty(_runDirBox.Text))
-                dlg.SelectedPath = _runDirBox.Text;
-            if (dlg.ShowDialog() == DialogResult.OK)
-                _runDirBox.Text = dlg.SelectedPath;
-        }
-    }
-
-    private void SetAhkPath()
-    {
-        using (var dlg = new OpenFileDialog())
-        {
-            dlg.Filter = "AutoHotkey (*.exe)|*.exe";
-            dlg.Title = "Select AutoHotkey.exe";
-            if (dlg.ShowDialog() == DialogResult.OK)
+            catch (Exception ex) { output = ex.Message; }
+            if (temp != null) { output = output.Replace(temp, title); TryDelete(temp); }
+            UI(() =>
             {
-                if (_ahkPathBox == null)
-                    _ahkPathBox = new TextBox();
-                _ahkPathBox.Text = dlg.FileName;
-                _statusLabel.Text = "AHK path set: " + dlg.FileName;
-            }
-        }
+                bool ok = code == 0 && output.Length == 0;
+                _console.Begin("Validate: " + title);
+                if (ok) _console.Write("✓ AutoHotkey accepts " + title + " (loads without errors)", WbTheme.Green);
+                else { _console.Write("✖ AutoHotkey rejects " + title + " (exit code " + code + ")", WbTheme.Red); _console.Write(output, WbTheme.Text); ShowPanel(_console); }
+                Status(ok ? "✓ " + title + " is valid AutoHotkey" : "✖ " + title + ": " + output.Split('\n').FirstOrDefault(), ok ? WbTheme.Green : WbTheme.Red);
+            });
+        });
     }
-
-    private void SetTempPath()
-    {
-        using (var dlg = new SaveFileDialog())
-        {
-            dlg.Filter = "AHK Scripts (*.ahk)|*.ahk";
-            dlg.Title = "Set temp script location";
-            if (dlg.ShowDialog() == DialogResult.OK)
-                _tempPathBox.Text = dlg.FileName;
-        }
-    }
-
-    private static string GetCleanFirstNonCommentLine(string source)
-    {
-        if (string.IsNullOrEmpty(source)) return "";
-        using (var reader = new System.IO.StringReader(source))
-        {
-            string line;
-            bool inBlockComment = false;
-            while ((line = reader.ReadLine()) != null)
-            {
-                string trimmed = line.Trim();
-                if (string.IsNullOrEmpty(trimmed)) continue;
-
-                if (inBlockComment)
-                {
-                    if (trimmed.EndsWith("*/"))
-                    {
-                        inBlockComment = false;
-                    }
-                    continue;
-                }
-
-                if (trimmed.StartsWith("/*"))
-                {
-                    if (!trimmed.EndsWith("*/"))
-                    {
-                        inBlockComment = true;
-                    }
-                    continue;
-                }
-
-                if (trimmed.StartsWith(";"))
-                {
-                    continue;
-                }
-
-                return trimmed;
-            }
-        }
-        return "";
-    }
-
 }

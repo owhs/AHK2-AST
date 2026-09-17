@@ -1,553 +1,213 @@
-// AHK# AST Workbench — Comprehensive Parser, Analyzer & Test Runner
-// A premium WinForms GUI for parsing, inspecting, debugging, and running AHK2 scripts.
-// Compiled into ahk#.bridge.dll alongside AhkAstEngine.cs.
+// AHK2 AST Workbench — main window.
+//
+// Layout: script and output tabs in the middle; Outline and AST on the right; Problems and Console at the
+// bottom. The active script is parsed in the background as you type (Problems, squiggles, Outline, AST follow).
+// Flows run on the same background worker and open their result as an output tab.
+//
+// Partial files: .Shell (commands, menu, toolbar, palette, themes), .Docs (documents, navigation, session),
+// .Analysis (engine worker, live parse, editor <-> AST sync), .Flows (flow runs, compare, flow editor),
+// .Runner (run / stop / validate with AutoHotkey), .Trace (trace visualizer).
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading;
 using System.Windows.Forms;
 using WeifenLuo.WinFormsUI.Docking;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// COM-Visible Entry Point
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Main Form
-// ═══════════════════════════════════════════════════════════════════════════════
-
-internal partial class AstWorkbenchForm : Form
+internal partial class AstWorkbenchForm : Form, IWorkbenchHost
 {
     [STAThread]
     static void Main(string[] args)
     {
         UiLoader.Initialize();
-
-        AppDomain.CurrentDomain.UnhandledException += (s, e) =>
-        {
-            System.IO.File.WriteAllText("crash.log", e.ExceptionObject.ToString());
-        };
-        Application.ThreadException += (s, e) =>
-        {
-            System.IO.File.WriteAllText("crash.log", e.Exception.ToString());
-        };
+        AppDomain.CurrentDomain.UnhandledException += (s, e) => ReportCrash(e.ExceptionObject as Exception, true);
+        Application.ThreadException += (s, e) => ReportCrash(e.Exception, false);
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         var form = new AstWorkbenchForm();
-        if (args.Length > 0 && File.Exists(args[0]))
-            form.LoadFileOnShown(args[0]);
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "--tour" && i + 1 < args.Length) { form.EnableTour(args[++i]); continue; }
+            if (File.Exists(args[i])) form.LoadFileOnShown(args[i]);
+        }
         Application.Run(form);
     }
 
-    // ── Controls ──────────────────────────────────────────────────────────
+    static readonly string CrashLog = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log");
+
+    /// <summary>Appends to crash.log and tells the user (the app keeps running for UI-thread exceptions).</summary>
+    static void ReportCrash(Exception ex, bool fatal)
+    {
+        try { File.AppendAllText(CrashLog, "==== " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + (fatal ? " (fatal)" : "") + "\r\n" + ex + "\r\n\r\n"); } catch { }
+        if (ex == null) return;
+        try
+        {
+            MessageBox.Show("Something went wrong: " + ex.Message + "\n\nDetails were written to " + CrashLog + (fatal ? "" : "\n\nThe workbench keeps running; save your work if things look off."),
+                "AST Workbench", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch { }
+    }
+
+    // ── Shell ───────────────────────────────────────────────────────────────────────────────────────────
     private MenuStrip _menu;
     private ToolStrip _toolbar;
     private StatusStrip _status;
-    private ToolStripStatusLabel _statusLabel;
-    private ToolStripStatusLabel _statusStats;
-    private ToolStripStatusLabel _statusPos;
-
-    // Main layout
+    private ToolStripStatusLabel _statusLabel, _statusScript, _statusParse, _statusProblems, _statusPos;
     private DockPanel _dockPanel;
-    private DockContent _sourceContent;
-    private PipelineBuilderContent _pipelineBuilderContent;
-    private DockContent _treeContent;
-    private DockContent _emitTreeContent;
-    private DockContent _diagContentWindow;
-    private DockContent _emitSourceContent;
 
-    // Source panel
-    private Panel _sourcePanel;
-    private RichTextBox _sourceEditor;
-    private RichTextBox _emitSourceEditor;
-    private Panel _lineNumberPanel;
+    // ── Panels ──────────────────────────────────────────────────────────────────────────────────────────
+    private ProblemsPanel _problems;
+    private AstPanel _astPanel;
+    private OutlinePanel _outline;
+    private ConsolePanel _console;
+    private DiffWorkspaceContent _diffContent;
+    private EscaperUnescaperContent _escapeContent;
 
-    // AST tree
-    private Panel _treePanel;
-    private TreeView _astTree;
-    private TextBox _treeFilter;
-    private Label _treeStats;
-
-    private Panel _emitTreePanel;
-    private TreeView _emitAstTree;
-    private TextBox _emitTreeFilter;
-    private Label _emitTreeStats;
-
-    // Trace visualizer panel
+    // ── Trace visualizer (AstWorkbenchForm.Trace.cs) ────────────────────────────────────────────────────
     private DockContent _traceVisualizerContent;
     private SplitContainer _traceSplit;
     private TreeView _traceTree;
     private RichTextBox _traceDetails;
     private CheckBox _chkAutoLoadTrace;
-    private Button _btnLoadTrace;
-    private Button _btnClearTrace;
-    private Button _btnOpenHtmlView;
+    private Button _btnLoadTrace, _btnClearTrace, _btnOpenHtmlView;
     private string _lastLoadedTraceFile;
     private Panel _tracePanel;
     private BorderlessTabControl _traceTabs;
     private Panel _traceTabStrip;
-    private Button _btnTraceCallTree;
-    private Button _btnTraceWaterfall;
-    private Button _btnTraceStats;
-    private TabPage _traceTreeTab;
-    private TabPage _traceWaterfallTab;
-    private TabPage _traceStatsTab;
+    private Button _btnTraceCallTree, _btnTraceWaterfall, _btnTraceStats;
+    private TabPage _traceTreeTab, _traceWaterfallTab, _traceStatsTab;
     private Panel _chartScrollPanel;
     private TraceWaterfallChart _waterfallChart;
     private ListView _traceStatsList;
     private List<TraceItem> _flatTraceItems = new List<TraceItem>();
 
+    // ── State ───────────────────────────────────────────────────────────────────────────────────────────
+    private AHK2AST.UI.WorkbenchState _state;
+    private AhkAstEngine _engine;            // for flows (has the missing-plugin prompt)
+    private readonly List<string> _pendingLoads = new List<string>();
 
-    private AstNode _emitCurrentAst;
+    /// <summary>Path of the script the analysis and flows work on (used by the trace visualizer).</summary>
+    private string _currentFile { get { var t = AnalysisTarget; return t == null ? null : t.FilePath; } }
 
-    // Diagnostics tabs
-    private Panel _diagTabs;
-    private Panel _diagContent;
-    private Button _btnErrTab;
-    private Button _btnLogTab;
-    private Button _btnRunTab;
-    private Button _btnEmitTab;
-    private Panel _errPanel;
-    private Panel _logPanel;
-    private Panel _runPanel;
-    private Panel _emitPanel;
-    private DataGridView _errorGrid;
-    private RichTextBox _parseLog;
-    private RichTextBox _runOutput;
-    private RichTextBox _emitView;
-
-    // Run config
-    private TextBox _runDirBox;
-    private TextBox _ahkPathBox;
-    private TextBox _tempPathBox;
-
-    // State
-    private string _currentFile;
-    private AhkAstEngine _engine;
-    private AstNode _currentAst;
-    private Process _runProcess;
-    private string _pendingLoadFile;
-    private ToolStripMenuItem _recentFilesMenu;
-    private bool _followIncludes = true;
-    private bool _inlineIncludes = true; // show inlined includes in source editor
-    private bool _wordWrap;
-    private System.Windows.Forms.Timer _syntaxHighlightTimer;
-    private System.Windows.Forms.Timer _sourceEditorScrollTimer;
-    private System.Windows.Forms.Timer _emitSourceEditorScrollTimer;
-    private System.Windows.Forms.Timer _emitViewScrollTimer;
-    private bool _debugMode;
-    private bool _isHighlighting;
-    private bool _autoFocusCode = true;
-    private Button _btnDebugTab;
-    private Panel _debugPanel;
-    private RichTextBox _debugLog;
-
-    // Emit options state
-    private bool _emitComments = true;
-    private bool _emitBlankLines = true;
-    private bool _useTabs = false;
-    private int _indentSize = 4;
-    private string _lastEmittedCode = ""; // raw emitted code for copy/export
-    private Dictionary<string, Dictionary<int, int>> _sourceLineMappings = new Dictionary<string, Dictionary<int, int>>(StringComparer.OrdinalIgnoreCase);
-    private bool _sourceEditorIsInlined = false;
-
-    private static readonly ImageList _nodeIcons = BuildNodeIcons();
-
-    public AstWorkbenchForm()
-    {
-        try
-        {
-            // Force native dark scrollbars across the application on Windows 10 (1809+) & Windows 11
-            SetPreferredAppMode(2); // 2 = ForceDark
-        }
-        catch
-        {
-            try
-            {
-                AllowDarkThemeForApp(true);
-            }
-            catch { }
-        }
-
-        try
-        {
-            _debugMode = File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DEBUG")) ||
-                         File.Exists(Path.Combine(Path.GetDirectoryName(typeof(AstWorkbench).Assembly.Location) ?? "", "DEBUG"));
-        }
-        catch { }
-
-        _engine = new AhkAstEngine();
-        _engine.OnMissingPlugin = (title, configType) =>
-        {
-            DialogResult res = DialogResult.No;
-            if (this.InvokeRequired)
-            {
-                this.Invoke(new Action(() =>
-                {
-                    res = MessageBox.Show(
-                        this,
-                        string.Format("The flow step '{0}' requires the plugin '{1}', which is not included in this build of AstEngine.dll.\n\nDo you want to skip this step and execute the rest of the flow?", title, configType),
-                        "Missing Plugin",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Warning
-                    );
-                }));
-            }
-            else
-            {
-                res = MessageBox.Show(
-                    this,
-                    string.Format("The flow step '{0}' requires the plugin '{1}', which is not included in this build of AstEngine.dll.\n\nDo you want to skip this step and execute the rest of the flow?", title, configType),
-                    "Missing Plugin",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Warning
-                );
-            }
-            return res == DialogResult.Yes;
-        };
-
-        try
-        {
-            var state = AHK2AST.UI.WorkbenchState.Load();
-            _inlineIncludes = state.InlineIncludes;
-            _followIncludes = state.FollowIncludes;
-            _wordWrap = state.WordWrap;
-
-            if (!string.IsNullOrEmpty(state.ThemeName))
-            {
-                var savedTheme = ThemeManager.Themes.FirstOrDefault(t => string.Equals(t.Name, state.ThemeName, StringComparison.OrdinalIgnoreCase));
-                if (savedTheme != null)
-                {
-                    WbTheme.Current = savedTheme;
-                }
-            }
-        }
-        catch { }
-
-        // Try loading grammar from known path
-        // Assembly.Location is empty when loaded from byte[] — guard against that
-        try
-        {
-            string asmLoc = typeof(AstWorkbench).Assembly.Location;
-            if (!string.IsNullOrEmpty(asmLoc))
-            {
-                string grammarPath = Path.Combine(
-                    Path.GetDirectoryName(asmLoc), "ahk2_grammar.json");
-                if (File.Exists(grammarPath))
-                    _engine.LoadGrammar(grammarPath);
-            }
-
-            if (_engine != null)
-            {
-                // Fallback: try relative to base directory
-                string altPath = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory, "src", "ast", "ahk2_grammar.json");
-                if (File.Exists(altPath))
-                    _engine.LoadGrammar(altPath);
-            }
-        }
-        catch { /* Grammar is optional — parser works without it */ }
-
-        _syntaxHighlightTimer = new System.Windows.Forms.Timer { Interval = 350 };
-        _syntaxHighlightTimer.Tick += (s, e) =>
-        {
-            LogDebug("Timer Tick: _syntaxHighlightTimer");
-            _syntaxHighlightTimer.Stop();
-            HighlightControl(_sourceEditor);
-        };
-
-        _sourceEditorScrollTimer = new System.Windows.Forms.Timer { Interval = 80 };
-        _sourceEditorScrollTimer.Tick += (s, e) =>
-        {
-            _sourceEditorScrollTimer.Stop();
-            HighlightControl(_sourceEditor);
-        };
-
-        _emitSourceEditorScrollTimer = new System.Windows.Forms.Timer { Interval = 80 };
-        _emitSourceEditorScrollTimer.Tick += (s, e) =>
-        {
-            _emitSourceEditorScrollTimer.Stop();
-            HighlightControl(_emitSourceEditor);
-        };
-
-        _emitViewScrollTimer = new System.Windows.Forms.Timer { Interval = 80 };
-        _emitViewScrollTimer.Tick += (s, e) =>
-        {
-            _emitViewScrollTimer.Stop();
-            HighlightControl(_emitView);
-        };
-
-        InitializeForm();
-        BuildMenu();
-        BuildToolbar();
-        BuildStatusBar();
-        BuildLayout();
-
-        WbTheme.Apply(this);
-        ApplyDeepTheme();
-    }
-
-    public void LoadFileOnShown(string path)
-    {
-        _pendingLoadFile = path;
-    }
-
-    protected override void OnShown(EventArgs e)
-    {
-        base.OnShown(e);
-
-        // Theme the dock panel if needed
-        try
-        {
-            if (_dockPanel != null)
-            {
-                _dockPanel.Theme = WbTheme.Current.IsDark ? (ThemeBase)new VS2015DarkTheme() : new VS2015LightTheme();
-                
-                string layoutPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DockLayout.xml");
-                if (File.Exists(layoutPath))
-                {
-                    // Basic attempt to restore layout
-                    try { _dockPanel.LoadFromXml(layoutPath, GetContentFromPersistString); } catch { }
-                }
-            }
-        }
-        catch { }
-
-        if (!string.IsNullOrEmpty(_pendingLoadFile))
-            LoadFile(_pendingLoadFile);
-    }
-
-    private IDockContent GetContentFromPersistString(string persistString)
-    {
-        if (persistString == typeof(PipelineBuilderContent).ToString())
-        {
-            if (_pipelineBuilderContent == null)
-            {
-                _pipelineBuilderContent = new PipelineBuilderContent();
-                _pipelineBuilderContent.HideOnClose = true;
-                _pipelineBuilderContent.GetSourceCodeRequested += () => _sourceEditor.Text;
-                _pipelineBuilderContent.GetActiveFilePathRequested += () => _currentFile;
-            }
-            return _pipelineBuilderContent;
-        }
-        // Simplified: return existing contents based on Text property or default if not tracked.
-        if (persistString.Contains("Source") && _sourceContent != null) return _sourceContent;
-        if (persistString.Contains("AST") && _treeContent != null) return _treeContent;
-        if (persistString.Contains("EscaperUnescaperContent")) return GetOrCreateEscapeWorkspace();
-        return null;
-    }
-
-    protected override void OnFormClosing(FormClosingEventArgs e)
-    {
-        base.OnFormClosing(e);
-        try
-        {
-            string layoutPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DockLayout.xml");
-            if (_dockPanel != null) _dockPanel.SaveAsXml(layoutPath);
-        }
-        catch { }
-    }
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
-
-    [DllImport("uxtheme.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
     private static extern int SetWindowTheme(IntPtr hWnd, string pszSubAppName, string pszSubIdList);
 
     [DllImport("uxtheme.dll", EntryPoint = "#135", SetLastError = true)]
     private static extern int SetPreferredAppMode(int preferredAppMode);
 
-    [DllImport("uxtheme.dll", EntryPoint = "#135", SetLastError = true)]
-    private static extern int AllowDarkThemeForApp(bool allow);
+    public AstWorkbenchForm()
+    {
+        try { SetPreferredAppMode(WbTheme.Current.IsDark ? 2 : 0); } catch { }
+        _state = AHK2AST.UI.WorkbenchState.Load();
+        var theme = ThemeManager.Themes.FirstOrDefault(t => string.Equals(t.Name, _state.ThemeName, StringComparison.OrdinalIgnoreCase));
+        if (theme != null) WbTheme.Current = theme;
 
-    [DllImport("user32.dll")]
-    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+        _engine = new AhkAstEngine();
+        _engine.OnMissingPlugin = (title, configType) =>
+        {
+            DialogResult res = DialogResult.No;
+            Action ask = () => res = MessageBox.Show(this,
+                string.Format("The flow step '{0}' needs the plugin '{1}', which is not in this build of AstEngine.dll.\n\nSkip this step and run the rest of the flow?", title, configType),
+                "Missing plugin", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (InvokeRequired) Invoke(ask); else ask();
+            return res == DialogResult.Yes;
+        };
+
+        Text = "AHK2 AST Workbench";
+        Icon = BuildAppIcon();
+        Size = new Size(1600, 950);
+        MinimumSize = new Size(900, 560);
+        StartPosition = FormStartPosition.CenterScreen;
+        WindowState = FormWindowState.Maximized;
+        KeyPreview = true;
+        Font = WbTheme.UIFont;
+        BackColor = WbTheme.Crust;
+
+        BuildShell();
+        StartEngineWorker();
+        ApplyTheme();
+    }
+
+    public void LoadFileOnShown(string path) { _pendingLoads.Add(path); }
+
+    /// <summary>For the COM wrapper (AstWorkbench.OpenFile).</summary>
+    public void LoadFile(string path) { OpenFile(path); }
 
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        ApplyThemeToTitleBar();
+        UiTheming.TitleBar(this);
     }
 
-    private void ApplyThemeToTitleBar()
+    protected override void OnShown(EventArgs e)
     {
-        if (Environment.OSVersion.Version.Major >= 10)
-        {
-            int useImmersiveDarkMode = WbTheme.Current.IsDark ? 1 : 0;
-            DwmSetWindowAttribute(this.Handle, 20, ref useImmersiveDarkMode, sizeof(int));
-            DwmSetWindowAttribute(this.Handle, 19, ref useImmersiveDarkMode, sizeof(int));
-
-            // Flush the window frame to force an instant titlebar repaint
-            SetWindowPos(this.Handle, IntPtr.Zero, 0, 0, 0, 0, 0x0027); // SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
-        }
+        base.OnShown(e);
+        RestoreSession();
+        foreach (var p in _pendingLoads) OpenFile(p);
+        _pendingLoads.Clear();
+        if (Documents().Count == 0) ShowWelcome();
+        StartTourIfRequested();
     }
 
-    private void RefreshTheme()
+    protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        ApplyThemeToTitleBar();
-
-        BackColor = WbTheme.Crust;
-        ForeColor = WbTheme.Text;
-        Font = WbTheme.UIFont;
-
-        _menu.BackColor = WbTheme.Crust;
-        _menu.ForeColor = WbTheme.Text;
-
-        WbTheme.Apply(this);
-        ApplyDeepTheme();
-
-        // Refresh editor syntax highlighting
-        HighlightControl(_sourceEditor);
-
-        // Redraw tree view
-        if (_astTree != null) _astTree.Invalidate();
+        foreach (var d in Scripts().ToList())
+            if (!d.ConfirmClose()) { e.Cancel = true; return; }
+        SaveSession();
+        StopRun(false);
+        base.OnFormClosing(e);
+        foreach (var d in Scripts().ToList()) d.ForceClose = true;
     }
 
-    // ── Form Setup ────────────────────────────────────────────────────────
+    // ── IWorkbenchHost ──────────────────────────────────────────────────────────────────────────────────
 
-    private void InitializeForm()
+    public void Status(string text, Color color)
     {
-        Text = "AHK2AST Workbench";
-        Size = new Size(1600, 950);
-        WindowState = FormWindowState.Maximized;
-        MinimumSize = new Size(900, 600);
-        StartPosition = FormStartPosition.CenterScreen;
-        BackColor = WbTheme.Crust;
-        ForeColor = WbTheme.Text;
-        Font = WbTheme.UIFont;
-        DoubleBuffered = true;
-        Icon = BuildAppIcon();
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke((Action)(() => Status(text, color))); return; }
+        _statusLabel.Text = text;
+        _statusLabel.ForeColor = color;
     }
 
-    // ── File Operations ───────────────────────────────────────────────────
-
-    public void LoadFile(string path)
-    {
-        if (!File.Exists(path)) return;
-        try
-        {
-            _sourceEditor.Text = File.ReadAllText(path, Encoding.UTF8);
-            _sourceEditorIsInlined = false;
-            HighlightControl(_sourceEditor);
-            _currentFile = path;
-            Text = "AHK# AST Workbench — " + Path.GetFileName(path);
-
-            // Auto-set working directory to file's directory
-            if (string.IsNullOrEmpty(_runDirBox.Text))
-                _runDirBox.Text = Path.GetDirectoryName(path);
-
-            if (_sourceContent != null)
-            {
-                if (_sourceContent.IsHidden)
-                {
-                    _sourceContent.Show(_dockPanel, DockState.Document);
-                }
-                _sourceContent.Activate();
-            }
-
-            _statusLabel.Text = "Loaded: " + path;
-            ParseCurrent();
-            AddToRecentFiles(path);
-        }
-        catch (Exception ex)
-        {
-            _statusLabel.Text = "Error loading file: " + ex.Message;
-        }
-    }
-
-    private void AddToRecentFiles(string path)
+    static Icon BuildAppIcon()
     {
         try
         {
-            var state = AHK2AST.UI.WorkbenchState.Load();
-            if (state.RecentFiles == null) state.RecentFiles = new List<string>();
-            state.RecentFiles.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
-            state.RecentFiles.Insert(0, path);
-            if (state.RecentFiles.Count > 10)
-            {
-                state.RecentFiles = state.RecentFiles.Take(10).ToList();
-            }
-            state.Save();
-            UpdateRecentFilesMenu();
+            var ico = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            if (ico != null) return ico;
         }
         catch { }
+        return SystemIcons.Application;
     }
+}
 
-    private void OpenFileDialog()
+internal class AboutForm : Form
+{
+    public AboutForm()
     {
-        using (var dlg = new OpenFileDialog())
+        Text = "About";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        ClientSize = new Size(460, 220);
+        BackColor = WbTheme.Base;
+        ForeColor = WbTheme.Text;
+        Font = WbTheme.UIFont;
+        var title = new Label { Text = "AHK2 AST Workbench", Font = new Font("Segoe UI", 16f), AutoSize = true, Location = new Point(24, 22), ForeColor = WbTheme.Text };
+        var body = new Label
         {
-            dlg.Filter = "AHK Scripts (*.ahk)|*.ahk|All Files (*.*)|*.*";
-            dlg.Title = "Open AHK Script";
-            if (_currentFile != null)
-                dlg.InitialDirectory = Path.GetDirectoryName(_currentFile);
-            if (dlg.ShowDialog() == DialogResult.OK)
-                LoadFile(dlg.FileName);
-        }
-    }
-
-    /*private void OpenFolderDialog()
-    {
-        using (var dlg = new FolderBrowserDialog())
-        {
-            dlg.Description = "Select AHK project folder";
-            if (dlg.ShowDialog() == DialogResult.OK)
-            {
-                _runDirBox.Text = dlg.SelectedPath;
-                // Find first .ahk file
-                var files = Directory.GetFiles(dlg.SelectedPath, "*.ahk", SearchOption.TopDirectoryOnly);
-                if (files.Length > 0)
-                    LoadFile(files[0]);
-            }
-        }
-    }*/
-
-    private void SaveSource()
-    {
-        if (string.IsNullOrEmpty(_currentFile))
-        { SaveSourceAs(); return; }
-
-        if (_sourceEditorIsInlined)
-        {
-            var result = MessageBox.Show(
-                "The source editor currently shows inlined includes. Saving will permanently overwrite your file with the inlined code, destroying #include directives. Are you sure you want to proceed?",
-                "Warning", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-            if (result != DialogResult.Yes) return;
-        }
-
-        File.WriteAllText(_currentFile, _sourceEditor.Text, Encoding.UTF8);
-        _statusLabel.Text = "Saved: " + _currentFile;
-    }
-
-    private void SaveSourceAs()
-    {
-        using (var dlg = new SaveFileDialog())
-        {
-            dlg.Filter = "AHK Scripts (*.ahk)|*.ahk|All Files (*.*)|*.*";
-            dlg.Title = "Save AHK Script";
-            if (dlg.ShowDialog() == DialogResult.OK)
-            {
-                _currentFile = dlg.FileName;
-                File.WriteAllText(_currentFile, _sourceEditor.Text, Encoding.UTF8);
-                Text = "AHK# AST Workbench — " + Path.GetFileName(_currentFile);
-                _statusLabel.Text = "Saved: " + _currentFile;
-            }
-        }
-    }
-
-    internal class LineMapping
-    {
-        public string FileName { get; set; }
-        public int OriginalLine { get; set; }
+            Text = "Parser, emitter and optimiser for AutoHotkey v2.\n\nEngine " + typeof(AhkAstEngine).Assembly.GetName().Version +
+                   "\nFlows are verified by the test harness on a corpus of ~1,000 real scripts.",
+            AutoSize = false, Location = new Point(26, 70), Size = new Size(410, 90), ForeColor = WbTheme.Subtext1
+        };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(360, 170), Size = new Size(76, 28) };
+        Controls.AddRange(new Control[] { title, body, ok });
+        AcceptButton = ok;
+        UiTheming.Apply(ok);
+        HandleCreated += (s, e) => UiTheming.TitleBar(this);
     }
 }

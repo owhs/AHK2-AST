@@ -1,3 +1,8 @@
+# **!!!!!!!!EXPERIMENTAL AS FUCK BOIIIIII!!!!!!!**
+
+
+
+
 # AHK2 AST Parser, Optimizer, & Minifier
 
 An optimizing compiler engine, parser, and minifier suite for **AutoHotkey v2** written in C#. This library parses AutoHotkey v2 source code into an Abstract Syntax Tree (AST), performs multi-pass tree shaking and code optimization, mangles variable and function names for size reduction, and formats/beautifies the generated code.
@@ -36,6 +41,39 @@ You can compile the entire workspace (both the `AstEngine.dll` library and the `
 ```
 
 *Note: This script automatically detects `csc.exe` in the .NET Framework 4.x folder, gathers all engine source files, checks content hashes, and compiles output files under the `build\` folder.*
+
+---
+
+## Using the Workbench
+
+`build\AstWorkbench.exe [script.ahk]` — or drop a script on the window.
+
+- **Editor tabs hold your files as they are** (Ctrl+S saves; unsaved tabs show ●; files changed on disk reload).
+  `#Include` files open as their own tabs when you jump into them; the script that includes them stays the one
+  that is analysed.
+- **Live analysis**: the script is parsed in the background while you type. **Problems** (click to jump; squiggles,
+  line tint and a gutter dot in the editor), **Outline** (classes, functions, hotkeys, includes; `@` in the
+  palette) and **AST** (code preview per node, follows the caret, search, hide comments) update together.
+- **Flows**: pick one on the toolbar (Round-trip, Beautify, Optimise, Tree-shake, Minify safe/aggressive/extreme,
+  analysis, trace, Nim…) and press **F6**. The result opens next to the script with its size/time and actions:
+  Save as, Compare (side-by-side diff), Validate (AutoHotkey `/Validate`), Run, Open as script, Re-run.
+  Your own flows (Flows › New flow / Edit current flow) are saved in `build\Flows\`.
+- **F5** runs the script, **F7** validates it, **Shift+F5** stops the run (only the process the Workbench started).
+  Output and AutoHotkey errors appear in **Console** (double-click `file (line)` to jump).
+- **Ctrl+Shift+P**: every command, flow, recent file and theme. `@name` = go to symbol, `:123` = go to line.
+
+Settings, recent files and the open session live next to the exe (`WorkbenchState.json`, `DockLayout.v2.xml`).
+
+---
+
+## AstHost.exe (engine as a helper process)
+
+`build\AstHost.exe` runs the engine as one long-lived, windowless process for other programs (AxStudio): one JSON
+request per line on stdin, one JSON reply per line on stdout, exits when stdin closes. Requests: `parse` (the tree with
+exact source ranges), `outline`, `errors`, `edit` (text-preserving splices: replace / insert before / after / delete),
+`flow`, `nodeAt`. Protocol and reply shapes: [src/host/PROTOCOL.md](src/host/PROTOCOL.md); node types:
+[NODES.md](NODES.md). Build + protocol test: `.\harness\harness.ps1 host` (`--install` copies it to `build\` and
+AxStudio's `studio\bin\`).
 
 ---
 

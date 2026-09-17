@@ -18,3 +18,12 @@ scratch/
 !build/AstEngine.dll
 !build/AstWorkbench.exe
 !build/Flows/optimise.json
+
+# test harness: sources, flows, cases and corpus config are tracked; builds/state/results are not
+harness/bin/
+harness/state/
+harness/out/
+!harness/harness.ps1
+!harness/flows/*.json
+
+.claude/

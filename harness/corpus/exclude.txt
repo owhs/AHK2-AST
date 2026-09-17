@@ -1,0 +1,9 @@
+# Substrings (case-insensitive); any matching path is left out of the corpus.
+\.git\
+\node_modules\
+\AppData\Local\Temp\
+\.gemini\
+\.antigravity
+\SciTE\
+\AutoHotkey\v1.1
+\projects\c#\AHK2 AST\

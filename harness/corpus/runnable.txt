@@ -1,0 +1,10 @@
+# Scripts the harness may actually EXECUTE (with "run --exec") to compare runtime behaviour of the
+# original vs every transformed output. Everything else is only ever loaded with /Validate, which
+# runs no script code.
+#
+# Even allow-listed scripts run on the invisible sandbox desktop inside a job object that blocks the
+# clipboard, system settings, display changes and logoff, and they are killed after a few seconds.
+# They can still touch files / registry / network like any normal script, so only list scripts whose
+# side effects you are happy to have happen repeatedly.
+#
+# One path (or path substring) per line.

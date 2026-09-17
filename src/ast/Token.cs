@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -16,6 +16,7 @@ public enum TokenType
     Dot, DotDot, Assign, PlusAssign, MinusAssign, StarAssign, SlashAssign,
     DotAssign, ColonAssign,
     BitwiseAndAssign, BitwiseOrAssign, BitwiseXorAssign, IntDivAssign, // &=, |=, ^=, //=
+    ShiftLeftAssign, ShiftRightAssign, UnsignedShiftRightAssign, // <<=, >>=, >>>=
     Equal, NotEqual, StrictEqual, StrictNotEqual, // ==, !=, ===, !==
     Less, Greater, LessEqual, GreaterEqual,
     RegexEqual, // ~=
@@ -49,6 +50,11 @@ public class Token
     public string Value;
     public int Line;
     public int Column;
+    public string Metadata;
+    /// <summary>Character offsets [StartOffset, EndOffset) of the token in the ORIGINAL source (before continuation
+    /// sections were joined); -1 for tokens the parser made up. Line/Column are the logical (joined-text) position.</summary>
+    public int StartOffset = -1;
+    public int EndOffset = -1;
 
     public Token(TokenType type, string value, int line, int col)
     {
@@ -58,5 +64,35 @@ public class Token
     public override string ToString()
     {
         return string.Format("[{0} '{1}' @{2}:{3}]", Type, Value, Line, Column);
+    }
+}
+
+/// <summary>Single source of truth for token classes used by both the lexer and the parser.</summary>
+public static class TokenKinds
+{
+    /// <summary>Every assignment operator: := += -= *= /= //= .= |= &amp;= ^= &lt;&lt;= &gt;&gt;= &gt;&gt;&gt;= ??=</summary>
+    public static bool IsAssignment(TokenType type)
+    {
+        switch (type)
+        {
+            case TokenType.Assign:
+            case TokenType.ColonAssign:
+            case TokenType.PlusAssign:
+            case TokenType.MinusAssign:
+            case TokenType.StarAssign:
+            case TokenType.SlashAssign:
+            case TokenType.DotAssign:
+            case TokenType.NullCoalesceAssign:
+            case TokenType.BitwiseAndAssign:
+            case TokenType.BitwiseOrAssign:
+            case TokenType.BitwiseXorAssign:
+            case TokenType.IntDivAssign:
+            case TokenType.ShiftLeftAssign:
+            case TokenType.ShiftRightAssign:
+            case TokenType.UnsignedShiftRightAssign:
+                return true;
+            default:
+                return false;
+        }
     }
 }

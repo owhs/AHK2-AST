@@ -1,0 +1,22 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ],
+    "Compatibility": "entry"
+  },
+  "Meta": {
+    "Name": "Tree-shake (Aggressive profile)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Tree-shake",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.TreeShakerConfig",
+      "ConfigJson": "{\"Profile\":2}"
+    }
+  ]
+}

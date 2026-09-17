@@ -314,6 +314,8 @@ internal partial class AstWorkbenchForm : Form
         // Auto-stretch first column to prevent unthemed white slack space on the right of header columns
         _traceStatsList.Resize += (s, e) =>
         {
+            // resize events still arrive while the ListView is being disposed (columns already gone)
+            if (_traceStatsList.IsDisposed || _traceStatsList.Disposing || _traceStatsList.Columns.Count == 0) return;
             int otherColsWidth = 0;
             for (int idx = 1; idx < _traceStatsList.Columns.Count; idx++)
             {
@@ -841,8 +843,17 @@ internal partial class AstWorkbenchForm : Form
         }
     }
 
+    private static void EnableDoubleBuffering(Control control)
+    {
+        if (control == null) return;
+        var prop = typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        if (prop != null) prop.SetValue(control, true, null);
+    }
+
     private void ShowTraceVisualizer()
     {
+        if (_traceVisualizerContent != null && _traceVisualizerContent.DockPanel == null)
+            _traceVisualizerContent.Show(_dockPanel, DockState.DockBottom);
         if (_traceVisualizerContent != null)
         {
             _traceVisualizerContent.Show(_dockPanel, DockState.DockBottom);

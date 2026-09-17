@@ -1,0 +1,21 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ]
+  },
+  "Meta": {
+    "Name": "Optimise (everything, strip comments, assume uncompiled)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Optimise",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.OptimiseConfig",
+      "ConfigJson": "{\"RemoveDuplicateDirectives\":true,\"ConvertIfToSwitch\":true,\"FoldMathConstants\":true,\"FoldLogicalConstants\":true,\"PruneDeadBranches\":true,\"FoldStringConcats\":true,\"FoldConsecutiveStringAssigns\":true,\"BuildStateOptimize\":2,\"StripComments\":true,\"PatchIncludeSelfExecution\":true}"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "Harness": {
+    "Modes": [
+      "inline"
+    ]
+  },
+  "Meta": {
+    "Name": "Custom transform (strip comments + conditional compilation)",
+    "Description": "harness flow",
+    "EmitDiagnosticsComments": false,
+    "CustomProperties": ""
+  },
+  "Steps": [
+    {
+      "Title": "Custom Transform",
+      "Icon": "",
+      "ConfigType": "AHK2AST.Plugins.CustomTransformConfig",
+      "ConfigJson": "{\"StripComments\":true,\"ConditionalCompilation\":true,\"PreprocessorVars\":\"DEBUG=false\",\"RenameFrom\":\"\",\"RenameTo\":\"\",\"TargetVariable\":\"\",\"NewValue\":\"\"}"
+    }
+  ]
+}
